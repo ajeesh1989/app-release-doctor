@@ -9,7 +9,7 @@ const execAsync = promisify(exec);
 // ============================================================
 // MCP SERVER
 // ============================================================
-const server = new McpServer({
+export const server = new McpServer({
     name: "app-release-doctor",
     version: "1.1.0",
 });
@@ -1882,12 +1882,23 @@ WHAT YOU SHOULD DO
 // ============================================================
 // MCP SERVER STARTUP
 // ============================================================
-async function main() {
+export async function startStdioServer() {
     const transport = new StdioServerTransport();
     await server.connect(transport);
 }
-main().catch((error) => {
-    console.error("Fatal MCP server error:", error);
-    process.exit(1);
-});
+// ============================================================
+// START STDIO ONLY WHEN RUN DIRECTLY
+// ============================================================
+const currentFile = path.resolve(new URL(import.meta.url).pathname);
+const executedFile = process.argv[1]
+    ? path.resolve(process.argv[1])
+    : "";
+if (currentFile === executedFile &&
+    process.env.APP_RELEASE_DOCTOR_TRANSPORT !==
+        "http") {
+    startStdioServer().catch((error) => {
+        console.error("Fatal MCP server error:", error);
+        process.exit(1);
+    });
+}
 //# sourceMappingURL=index.js.map
