@@ -1,0 +1,1004 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+  />
+
+  <meta
+    name="description"
+    content="App Release Doctor — inspect Flutter projects and Android App Bundles before Google Play."
+  />
+
+  <title>App Release Doctor</title>
+
+  <link rel="stylesheet" href="/style.css" />
+</head>
+
+<body>
+
+  <div class="app-shell">
+
+    <!-- ==================================================
+         SIDEBAR
+         ================================================== -->
+
+    <aside class="sidebar">
+
+      <div class="brand">
+
+        <div class="brand-icon">
+          +
+        </div>
+
+        <div class="brand-copy">
+
+          <div class="brand-name">
+            APP RELEASE
+          </div>
+
+          <div class="brand-sub">
+            DOCTOR
+          </div>
+
+        </div>
+
+      </div>
+
+
+      <nav class="nav">
+
+        <button
+          class="nav-item active"
+          data-section="dashboard"
+          type="button"
+        >
+          <span class="nav-icon">⌂</span>
+          <span>Dashboard</span>
+        </button>
+
+
+        <button
+          class="nav-item"
+          data-section="aab"
+          type="button"
+        >
+          <span class="nav-icon">▣</span>
+          <span>AAB Inspector</span>
+        </button>
+
+
+        <button
+          class="nav-item"
+          data-section="project"
+          type="button"
+        >
+          <span class="nav-icon">◇</span>
+          <span>Flutter Project</span>
+        </button>
+
+
+        <button
+          class="nav-item"
+          data-section="readiness"
+          type="button"
+        >
+          <span class="nav-icon">✓</span>
+          <span>Play Store Readiness</span>
+        </button>
+
+      </nav>
+
+
+      <div class="sidebar-bottom">
+
+        <div class="doctor-status">
+
+          <span class="status-dot"></span>
+
+          <div>
+            <strong>Doctor Online</strong>
+            <small>Local inspection engine</small>
+          </div>
+
+        </div>
+
+
+        <div class="version">
+
+          APP RELEASE DOCTOR
+
+          <span>
+            v2.0
+          </span>
+
+        </div>
+
+      </div>
+
+    </aside>
+
+
+    <!-- ==================================================
+         MAIN
+         ================================================== -->
+
+    <main class="main">
+
+      <!-- ==================================================
+           TOPBAR
+           ================================================== -->
+
+      <header class="topbar">
+
+        <div class="topbar-heading">
+
+          <div
+            class="page-title"
+            id="pageTitle"
+          >
+            Release Dashboard
+          </div>
+
+          <div
+            class="page-subtitle"
+            id="pageSubtitle"
+          >
+            Inspect your Android release before Google Play
+          </div>
+
+        </div>
+
+
+        <div class="top-actions">
+
+          <button
+            class="theme-toggle"
+            id="themeToggle"
+            type="button"
+            title="Toggle theme"
+            aria-label="Toggle theme"
+          >
+            <span id="themeIcon">☾</span>
+          </button>
+
+
+          <button
+            class="ghost-button"
+            id="refreshButton"
+            type="button"
+          >
+            ↻
+            <span>Refresh</span>
+          </button>
+
+        </div>
+
+      </header>
+
+
+      <!-- ==================================================
+           DASHBOARD
+           ================================================== -->
+
+      <section
+        id="dashboard"
+        class="page-section active"
+      >
+
+        <div class="hero">
+
+          <div class="hero-content">
+
+            <div class="eyebrow">
+              SMART RELEASE INSPECTION
+            </div>
+
+            <h1>
+              Check your app
+              <br />
+              before you ship.
+            </h1>
+
+            <p>
+              Analyze your Android App Bundle for release
+              risks, size problems, architectures, assets,
+              duplicates and other issues.
+            </p>
+
+            <button
+              class="primary-button"
+              id="heroInspectButton"
+              type="button"
+            >
+              Inspect an AAB
+              <span>→</span>
+            </button>
+
+          </div>
+
+
+          <div class="hero-medical">
+
+            <div class="pulse-ring"></div>
+
+            <div class="doctor-cross">
+              +
+            </div>
+
+            <div class="pulse-line">
+              ──╱╲──╱╲──
+            </div>
+
+          </div>
+
+        </div>
+
+
+        <div class="section-heading">
+
+          <div>
+
+            <h2>
+              Release checks
+            </h2>
+
+            <p>
+              Choose what you want to inspect.
+            </p>
+
+          </div>
+
+        </div>
+
+
+        <div class="check-grid">
+
+          <!-- AAB -->
+
+          <button
+            class="check-card"
+            data-section="aab"
+            type="button"
+          >
+
+            <div class="card-icon green">
+              AAB
+            </div>
+
+            <div class="check-card-body">
+
+              <h3>
+                AAB Inspector
+              </h3>
+
+              <p>
+                Inspect bundle contents, size,
+                native libraries and release risks.
+              </p>
+
+              <span class="card-link">
+                Inspect bundle →
+              </span>
+
+            </div>
+
+          </button>
+
+
+          <!-- FLUTTER PROJECT -->
+
+          <button
+            class="check-card"
+            data-section="project"
+            type="button"
+          >
+
+            <div class="card-icon blue">
+              FL
+            </div>
+
+            <div class="check-card-body">
+
+              <h3>
+                Flutter Project
+              </h3>
+
+              <p>
+                Check Android configuration,
+                SDK versions and release readiness.
+              </p>
+
+              <span class="card-link">
+                Check project →
+              </span>
+
+            </div>
+
+          </button>
+
+
+          <!-- PLAY STORE READINESS -->
+
+          <button
+            class="check-card"
+            data-section="readiness"
+            type="button"
+          >
+
+            <div class="card-icon green">
+              ✓
+            </div>
+
+            <div class="check-card-body">
+
+              <h3>
+                Play Store Readiness
+              </h3>
+
+              <p>
+                Run a final pre-flight check before
+                uploading your release to Google Play.
+              </p>
+
+              <span class="card-link">
+                Check readiness →
+              </span>
+
+            </div>
+
+          </button>
+
+
+          <!-- RELEASE BUILD -->
+
+          <div class="check-card disabled-card">
+
+            <div class="card-icon purple">
+              ◈
+            </div>
+
+            <div class="check-card-body">
+
+              <h3>
+                Release Build
+              </h3>
+
+              <p>
+                Build and validate a production
+                Android release.
+              </p>
+
+              <span class="card-link">
+                Coming next
+              </span>
+
+            </div>
+
+          </div>
+
+        </div>
+
+
+        <div class="empty-dashboard">
+
+          <div class="empty-icon">
+            ✓
+          </div>
+
+          <div>
+
+            <h3>
+              Ready for inspection
+            </h3>
+
+            <p>
+              Select an AAB above to generate your
+              first release health report.
+            </p>
+
+          </div>
+
+        </div>
+
+      </section>
+
+
+      <!-- ==================================================
+           AAB INSPECTOR
+           ================================================== -->
+
+      <section
+        id="aab"
+        class="page-section"
+      >
+
+        <div class="section-heading">
+
+          <div>
+
+            <div class="eyebrow">
+              AAB ANALYSIS
+            </div>
+
+            <h2>
+              Android App Bundle
+            </h2>
+
+            <p>
+              Upload your release AAB for a detailed
+              structural inspection.
+            </p>
+
+          </div>
+
+        </div>
+
+
+        <div
+          class="upload-area"
+          id="aabDropArea"
+        >
+
+          <input
+            type="file"
+            id="aabFile"
+            accept=".aab,application/octet-stream"
+            hidden
+          />
+
+          <div class="upload-icon">
+            ↑
+          </div>
+
+          <h3>
+            Drop your AAB here
+          </h3>
+
+          <p>
+            or choose a file from your computer
+          </p>
+
+          <button
+            class="secondary-button"
+            id="chooseAabButton"
+            type="button"
+          >
+            Choose AAB
+          </button>
+
+          <div
+            class="selected-file"
+            id="selectedAab"
+          >
+            No file selected
+          </div>
+
+        </div>
+
+
+        <button
+          class="inspect-button"
+          id="inspectAabButton"
+          type="button"
+          disabled
+        >
+
+          <span class="inspect-icon">
+            ⌕
+          </span>
+
+          Inspect Release
+
+        </button>
+
+
+        <div
+          class="loading-panel"
+          id="loadingPanel"
+        >
+
+          <div class="loader"></div>
+
+          <div>
+
+            <strong>
+              Doctor is examining your AAB...
+            </strong>
+
+            <span>
+              Reading bundle structure and analyzing release health.
+            </span>
+
+          </div>
+
+        </div>
+
+
+        <div
+          class="result-panel"
+          id="resultPanel"
+        ></div>
+
+      </section>
+
+
+      <!-- ==================================================
+           FLUTTER PROJECT
+           ================================================== -->
+
+      <section
+        id="project"
+        class="page-section"
+      >
+
+        <div class="section-heading">
+
+          <div>
+
+            <div class="eyebrow">
+              FLUTTER PROJECT
+            </div>
+
+            <h2>
+              Project readiness
+            </h2>
+
+            <p>
+              Check your Flutter Android project before
+              creating the release bundle.
+            </p>
+
+          </div>
+
+        </div>
+
+
+        <div class="project-card">
+
+          <div class="project-card-icon">
+            FL
+          </div>
+
+          <div class="project-card-content">
+
+            <h3>
+              Check your Flutter project
+            </h3>
+
+            <p>
+              Upload the project folder, or use a local
+              Windows path if the project is already on your PC.
+            </p>
+
+
+            <!-- FOLDER UPLOAD -->
+
+            <div
+              class="project-upload-area"
+              id="flutterProjectDropArea"
+            >
+
+              <input
+                type="file"
+                id="flutterProjectFolder"
+                webkitdirectory
+                directory
+                multiple
+                hidden
+              />
+
+              <div class="project-upload-icon">
+                ↑
+              </div>
+
+              <div class="project-upload-content">
+
+                <h4>
+                  Drop your Flutter project folder here
+                </h4>
+
+                <p>
+                  or choose the project folder from your computer
+                </p>
+
+                <button
+                  class="secondary-button"
+                  id="chooseFlutterFolderButton"
+                  type="button"
+                >
+                  Choose Flutter Folder
+                </button>
+
+                <div
+                  class="selected-file"
+                  id="selectedFlutterProject"
+                >
+                  No project folder selected
+                </div>
+
+              </div>
+
+            </div>
+
+
+            <!-- OR -->
+
+            <div class="project-or-divider">
+
+              <span>
+                OR
+              </span>
+
+            </div>
+
+
+            <!-- LOCAL PATH -->
+
+            <div class="path-label">
+              Local project path
+            </div>
+
+            <div class="path-row">
+
+              <input
+                type="text"
+                id="projectPath"
+                placeholder="Example: D:\Projects\my_flutter_app"
+                autocomplete="off"
+              />
+
+              <button
+                class="secondary-button"
+                id="checkProjectButton"
+                type="button"
+              >
+                Check Local Project
+              </button>
+
+            </div>
+
+
+            <div class="project-help">
+
+              <span>ⓘ</span>
+
+              <span>
+                Folder upload works without giving the Doctor
+                access to your original project location.
+              </span>
+
+            </div>
+
+          </div>
+
+        </div>
+
+
+        <div
+          class="project-result"
+          id="projectResult"
+        ></div>
+
+      </section>
+
+
+      <!-- ==================================================
+           PLAY STORE READINESS
+           ================================================== -->
+
+      <section
+        id="readiness"
+        class="page-section"
+      >
+
+        <div class="section-heading">
+
+          <div>
+
+            <div class="eyebrow">
+              PLAY STORE READINESS
+            </div>
+
+            <h2>
+              Can I safely upload this release?
+            </h2>
+
+            <p>
+              Run a final pre-flight check against the Android
+              project configuration used for your release.
+            </p>
+
+          </div>
+
+        </div>
+
+
+        <!-- READINESS INTRO -->
+
+        <div class="readiness-card readiness-intro">
+
+          <div class="readiness-intro-icon">
+            ✓
+          </div>
+
+          <div class="readiness-intro-content">
+
+            <h3>
+              Release pre-flight check
+            </h3>
+
+            <p>
+              App Release Doctor checks the key Android
+              configuration items that can cause release
+              problems before Google Play upload.
+            </p>
+
+          </div>
+
+        </div>
+
+
+        <!-- READINESS INPUT -->
+
+        <div class="readiness-card">
+
+          <div class="readiness-card-header">
+
+            <div>
+
+              <div class="readiness-card-eyebrow">
+                PROJECT SOURCE
+              </div>
+
+              <h3>
+                Check a Flutter project
+              </h3>
+
+              <p>
+                Enter the local path of the project you plan
+                to build and upload.
+              </p>
+
+            </div>
+
+          </div>
+
+
+          <div class="readiness-inputs">
+
+            <div class="readiness-input-group">
+
+              <label for="readinessProjectPath">
+                Local project path
+              </label>
+
+              <input
+                type="text"
+                id="readinessProjectPath"
+                placeholder="Example: D:\Projects\my_flutter_app"
+                autocomplete="off"
+              />
+
+            </div>
+
+
+            <button
+              class="primary-button readiness-run-button"
+              id="runReadinessButton"
+              type="button"
+            >
+
+              <span>✓</span>
+
+              Run Readiness Check
+
+            </button>
+
+          </div>
+
+
+          <div class="readiness-secondary-actions">
+
+            <button
+              class="secondary-button"
+              id="useLastProjectButton"
+              type="button"
+            >
+              Use Last Project Check
+            </button>
+
+            <span
+              class="readiness-last-project"
+              id="readinessLastProject"
+            >
+              No previous project check available
+            </span>
+
+          </div>
+
+        </div>
+
+
+        <!-- READINESS LOADING -->
+
+        <div
+          class="loading-panel"
+          id="readinessLoadingPanel"
+        >
+
+          <div class="loader"></div>
+
+          <div>
+
+            <strong>
+              Doctor is checking Play Store readiness...
+            </strong>
+
+            <span>
+              Validating SDK versions, signing and release configuration.
+            </span>
+
+          </div>
+
+        </div>
+
+
+        <!-- READINESS RESULT -->
+
+        <div
+          class="readiness-result"
+          id="readinessResult"
+        ></div>
+
+
+        <!-- READINESS EMPTY -->
+
+        <div
+          class="readiness-empty"
+          id="readinessEmpty"
+        >
+
+          <div class="readiness-empty-icon">
+            ✓
+          </div>
+
+          <h3>
+            Ready for a pre-flight check
+          </h3>
+
+          <p>
+            Enter a Flutter project path above to check the
+            configuration required for a production release.
+          </p>
+
+        </div>
+
+      </section>
+
+
+      <!-- ==================================================
+           GLOBAL FOOTER
+           Appears on every page
+           ================================================== -->
+
+      <footer class="contact-footer">
+
+        <div class="footer-brand">
+
+          <div
+            class="footer-logo"
+            aria-hidden="true"
+          >
+            <span class="footer-logo-cross">+</span>
+            <span class="footer-logo-check">✓</span>
+          </div>
+
+
+          <div class="footer-brand-copy">
+
+            <strong>
+              App Release Doctor
+            </strong>
+
+            <span>
+              Built for developers who want fewer release surprises.
+            </span>
+
+          </div>
+
+        </div>
+
+
+        <div class="readiness-contact">
+
+          <div class="readiness-contact-title">
+            Connect
+          </div>
+
+          <div class="readiness-contact-links">
+
+            <a
+              class="readiness-contact-link"
+              href="https://github.com/ajeesh1989"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <span>⌘</span>
+              <span>GitHub</span>
+            </a>
+
+
+            <a
+              class="readiness-contact-link"
+              href="https://www.linkedin.com/in/ajeesh-das/"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <span>in</span>
+              <span>LinkedIn</span>
+            </a>
+
+
+            <a
+              class="readiness-contact-link"
+              href="mailto:ajeesh1989@gmail.com"
+            >
+              <span>✉</span>
+              <span>Email</span>
+            </a>
+
+          </div>
+
+        </div>
+
+
+        <div class="footer-meta">
+
+          <span>
+            v2.0
+          </span>
+
+          <span class="footer-meta-dot">
+            •
+          </span>
+
+          <span>
+            Local developer tool
+          </span>
+
+        </div>
+
+
+        <div class="readiness-contact-disclaimer">
+
+          Passing these checks does not guarantee
+          Google Play approval.
+
+        </div>
+
+      </footer>
+
+    </main>
+
+  </div>
+
+
+  <!-- ==================================================
+       TOAST
+       ================================================== -->
+
+  <div
+    class="doctor-toast"
+    id="doctorToast"
+  ></div>
+
+
+  <script src="/app.js"></script>
+
+</body>
+</html>
