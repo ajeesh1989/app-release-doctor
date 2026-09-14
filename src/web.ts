@@ -1,21 +1,30 @@
 import express from "express";
+
 import multer from "multer";
+
 import fs from "fs";
+
 import path from "path";
+
 import os from "os";
+
 import crypto from "crypto";
+
 import AdmZip from "adm-zip";
+
 import { fileURLToPath } from "url";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 const __filename = fileURLToPath(import.meta.url);
+
 const __dirname = path.dirname(__filename);
 
 const app = express();
 
-const PORT = 3030;
+const PORT = Number(process.env.PORT || 3030);
 
 // ============================================================
 // REMOTE MCP CONFIGURATION
@@ -127,12 +136,6 @@ async function createRemoteClient(): Promise<Client> {
       }
     );
 
-  // The installed MCP SDK version has a slightly
-  // different Transport typing when
-  // exactOptionalPropertyTypes is enabled.
-  //
-  // The runtime transport is compatible, so use the
-  // same compatibility cast already used by remote-mcp.ts.
   const compatibleTransport =
     transport as unknown as Parameters<
       typeof client.connect
@@ -428,9 +431,11 @@ async function uploadProjectZipToRemote(
   return {
     uploadId:
       data.uploadId,
+
     fileName:
       data.fileName ||
       originalName,
+
     fileCount:
       typeof data.fileCount ===
       "number"
@@ -715,18 +720,23 @@ app.post(
 
     try {
       console.log("");
+
       console.log(
         "🩺 SMART AAB INSPECTION"
       );
+
       console.log(
         "-----------------------"
       );
+
       console.log(
         `File: ${originalName}`
       );
+
       console.log(
         "Backend: Remote MCP"
       );
+
       console.log("");
 
       // ------------------------------------------------------
@@ -780,7 +790,7 @@ app.post(
 
       const healthMatch =
         report.match(
-          /RELEASE HEALTH[\s\S]*?\n[^\n]*\s+(HEALTHY|NEEDS REVIEW|ATTENTION NEEDED|SIGNIFICANT ISSUES)\s+\d{1,3}\/100/i
+          /RELEASE HEALTH[\s\S]*?\n[^\n]*\*\s+(HEALTHY|NEEDS REVIEW|ATTENTION NEEDED|SIGNIFICANT ISSUES)\s+\d{1,3}\/100/i
         );
 
       let health =
@@ -868,18 +878,23 @@ app.post(
 
     try {
       console.log("");
+
       console.log(
         "📁 FLUTTER PROJECT UPLOAD"
       );
+
       console.log(
         "-------------------------"
       );
+
       console.log(
         `Browser files: ${files.length}`
       );
+
       console.log(
         "Backend: Remote MCP"
       );
+
       console.log("");
 
       // ------------------------------------------------------
@@ -1082,18 +1097,23 @@ app.post(
       }
 
       console.log("");
+
       console.log(
         "🩺 FLUTTER PROJECT CHECK"
       );
+
       console.log(
         "------------------------"
       );
+
       console.log(
         `Project: ${projectPath}`
       );
+
       console.log(
         "Backend: Local"
       );
+
       console.log("");
 
       const {
@@ -1195,18 +1215,23 @@ app.post(
       }
 
       console.log("");
+
       console.log(
         "🩺 PLAY STORE READINESS"
       );
+
       console.log(
         "----------------------"
       );
+
       console.log(
         `Project: ${projectPath}`
       );
+
       console.log(
         "Backend: Local"
       );
+
       console.log("");
 
       const {
@@ -1265,15 +1290,19 @@ app.post(
 
     try {
       console.log("");
+
       console.log(
         "🔨 RELEASE BUILD"
       );
+
       console.log(
         "----------------"
       );
+
       console.log(
         `Project: ${projectPath}`
       );
+
       console.log("");
 
       const {
@@ -1373,7 +1402,7 @@ async function startWebServer() {
 
   app.listen(
     PORT,
-    "127.0.0.1",
+    "0.0.0.0",
     () => {
       console.log("");
 
@@ -1386,7 +1415,7 @@ async function startWebServer() {
       );
 
       console.log(
-        `Web UI: http://127.0.0.1:${PORT}`
+        `Web UI: http://0.0.0.0:${PORT}`
       );
 
       console.log(

@@ -11,7 +11,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const app = express();
-const PORT = 3030;
+const PORT = Number(process.env.PORT || 3030);
 // ============================================================
 // REMOTE MCP CONFIGURATION
 // ============================================================
@@ -77,12 +77,6 @@ async function createRemoteClient() {
             headers,
         },
     });
-    // The installed MCP SDK version has a slightly
-    // different Transport typing when
-    // exactOptionalPropertyTypes is enabled.
-    //
-    // The runtime transport is compatible, so use the
-    // same compatibility cast already used by remote-mcp.ts.
     const compatibleTransport = transport;
     await client.connect(compatibleTransport);
     return client;
@@ -411,7 +405,7 @@ app.post("/api/inspect-aab", upload.single("aab"), async (req, res) => {
         const score = scoreMatch
             ? Math.min(100, Math.max(0, Number(scoreMatch[1])))
             : 0;
-        const healthMatch = report.match(/RELEASE HEALTH[\s\S]*?\n[^\n]*\s+(HEALTHY|NEEDS REVIEW|ATTENTION NEEDED|SIGNIFICANT ISSUES)\s+\d{1,3}\/100/i);
+        const healthMatch = report.match(/RELEASE HEALTH[\s\S]*?\n[^\n]*\*\s+(HEALTHY|NEEDS REVIEW|ATTENTION NEEDED|SIGNIFICANT ISSUES)\s+\d{1,3}\/100/i);
         let health = healthMatch?.[1] ||
             "";
         if (!health) {
@@ -732,11 +726,11 @@ async function startWebServer() {
         console.error("Remote AAB/project operations will retry when used.");
         console.error("");
     }
-    app.listen(PORT, "127.0.0.1", () => {
+    app.listen(PORT, "0.0.0.0", () => {
         console.log("");
         console.log("🩺 APP RELEASE DOCTOR");
         console.log("=====================");
-        console.log(`Web UI: http://127.0.0.1:${PORT}`);
+        console.log(`Web UI: http://0.0.0.0:${PORT}`);
         console.log(`Remote MCP: ${REMOTE_MCP_URL}`);
         console.log("");
     });
