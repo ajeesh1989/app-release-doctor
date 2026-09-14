@@ -3,9 +3,20 @@ import { promisify } from "util";
 import fs from "fs";
 import path from "path";
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import {
+  McpServer,
+} from "@modelcontextprotocol/sdk/server/mcp.js";
+
+import {
+  StdioServerTransport,
+} from "@modelcontextprotocol/sdk/server/stdio.js";
+
 import { z } from "zod";
+
+import {
+  resolveAabWorkspace,
+  resolveProjectWorkspace,
+} from "./remote-workspace.js";
 
 const execAsync = promisify(exec);
 
@@ -13,10 +24,6 @@ const execAsync = promisify(exec);
 // MCP SERVER
 // ============================================================
 
-export const server = new McpServer({
-  name: "app-release-doctor",
-  version: "1.1.0",
-});
 
 // ============================================================
 // HELPERS
@@ -42,141 +49,186 @@ function isAabPath(filePath: string): boolean {
 }
 
 function projectTempDirectory(): string {
-  const tempDirectory = path.join(process.cwd(), ".tmp");
+  const directory = path.join(
+    process.cwd(),
+    ".tmp",
+  );
 
-  if (!fs.existsSync(tempDirectory)) {
-    fs.mkdirSync(tempDirectory, {
+  if (!fs.existsSync(directory)) {
+    fs.mkdirSync(directory, {
       recursive: true,
     });
   }
 
-  return tempDirectory;
+  return directory;
 }
 
-function friendlyPath(projectPath: string): string {
-  return path.normalize(projectPath.trim());
+function friendlyPath(filePath: string): string {
+  return path.normalize(filePath);
 }
 
 function isFlutterProject(projectPath: string): boolean {
   return fs.existsSync(
-    path.join(projectPath, "pubspec.yaml")
+    path.join(projectPath, "pubspec.yaml"),
   );
 }
 
 function getBuildGradlePath(
-  projectPath: string
+  projectPath: string,
 ): string | null {
-  const ktsPath = path.join(
-    projectPath,
-    "android",
-    "app",
-    "build.gradle.kts"
-  );
+  const candidates = [
+    path.join(
+      projectPath,
+      "android",
+      "app",
+      "build.gradle",
+    ),
+    path.join(
+      projectPath,
+      "android",
+      "app",
+      "build.gradle.kts",
+    ),
+  ];
 
-  const groovyPath = path.join(
-    projectPath,
-    "android",
-    "app",
-    "build.gradle"
-  );
-
-  if (fs.existsSync(ktsPath)) {
-    return ktsPath;
-  }
-
-  if (fs.existsSync(groovyPath)) {
-    return groovyPath;
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
   }
 
   return null;
 }
 
 function extractNumber(
-  content: string,
-  pattern: RegExp
+  text: string,
+  patterns: RegExp[],
 ): number | null {
-  const match = content.match(pattern);
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
 
-  if (!match?.[1]) {
-    return null;
-  }
+    if (match?.[1]) {
+      const value = Number(match[1]);
 
-  const value = Number(match[1]);
-
-  return Number.isFinite(value) ? value : null;
-}
-
-function extractString(
-  content: string,
-  pattern: RegExp
-): string | null {
-  const match = content.match(pattern);
-
-  return match?.[1] ?? null;
-}
-
-function detectReleaseSigning(
-  gradleContent: string
-): boolean {
-  const kotlinSigningConfig =
-    /signingConfigs\s*\{[\s\S]*?(?:create\s*\(\s*"release"\s*\)|release)[\s\S]*?\}/i.test(
-      gradleContent
-    );
-
-  const kotlinReleaseAssignment =
-    /signingConfig\s*=\s*signingConfigs\s*\.\s*getByName\s*\(\s*"release"\s*\)/i.test(
-      gradleContent
-    );
-
-  const groovySigningConfig =
-    /signingConfigs\s*\{[\s\S]*?\brelease\s*\{[\s\S]*?\}/i.test(
-      gradleContent
-    );
-
-  const groovyReleaseAssignment =
-    /signingConfig\s+signingConfigs\.release/i.test(
-      gradleContent
-    );
-
-  return (
-    kotlinSigningConfig ||
-    kotlinReleaseAssignment ||
-    groovySigningConfig ||
-    groovyReleaseAssignment
-  );
-}
-
-function extractSdkValue(
-  content: string,
-  type: "compileSdk" | "targetSdk"
-): number | null {
-  const directPattern =
-    type === "compileSdk"
-      ? /compileSdk\s*=?\s*(\d+)/i
-      : /targetSdk\s*=?\s*(\d+)/i;
-
-  const direct = extractNumber(
-    content,
-    directPattern
-  );
-
-  if (direct !== null) {
-    return direct;
+      if (Number.isFinite(value)) {
+        return value;
+      }
+    }
   }
 
   return null;
 }
 
+function extractString(
+  text: string,
+  patterns: RegExp[],
+): string | null {
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+
+    if (match?.[1]) {
+      return match[1].trim();
+    }
+  }
+
+  return null;
+}
+
+function detectReleaseSigning(
+  gradleText: string,
+): boolean {
+  const text =
+    gradleText.toLowerCase();
+
+  // Kotlin DSL / Groovy release signing configuration
+  const hasReleaseSigningConfig =
+    /signingconfigs?\s*\{[\s\S]*?(create\s*\(\s*["']release["']|release\s*\{)/i.test(
+      gradleText,
+    ) ||
+    /signingconfigs?\.create\s*\(\s*["']release["']\s*\)/i.test(
+      gradleText,
+    );
+
+  // Release build type explicitly references release signing
+  const hasReleaseSigningReference =
+    /signingconfig\s*=\s*signingconfigs\.getbyname\s*\(\s*["']release["']\s*\)/i.test(
+      gradleText,
+    ) ||
+    /signingconfig\s+signingconfigs?\.release/i.test(
+      gradleText,
+    ) ||
+    /signingconfig\s*=\s*signingconfigs?\.release/i.test(
+      gradleText,
+    ) ||
+    /signingconfig\s+signingconfigs?\.getbyname\s*\(\s*["']release["']\s*\)/i.test(
+      gradleText,
+    );
+
+  // Keystore properties are another strong indicator
+  const hasKeystoreProperties =
+    /key\.properties/i.test(
+      gradleText,
+    ) &&
+    /storefile/i.test(
+      gradleText,
+    ) &&
+    /storepassword/i.test(
+      gradleText,
+    ) &&
+    /keyalias/i.test(
+      gradleText,
+    ) &&
+    /keypassword/i.test(
+      gradleText,
+    );
+
+  return (
+    hasReleaseSigningConfig &&
+    (
+      hasReleaseSigningReference ||
+      hasKeystoreProperties
+    )
+  );
+}
+
+function extractSdkValue(
+  gradleText: string,
+  property: string,
+): number | null {
+  const escaped = property.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    "\\$&",
+  );
+
+  const patterns = [
+    new RegExp(
+      `${escaped}\\s*=\\s*(\\d+)`,
+      "i",
+    ),
+    new RegExp(
+      `${escaped}\\s*\\(\\s*["'](\\d+)["']\\s*\\)`,
+      "i",
+    ),
+    new RegExp(
+      `${escaped}\\s+["']?(\\d+)["']?`,
+      "i",
+    ),
+  ];
+
+  return extractNumber(
+    gradleText,
+    patterns,
+  );
+}
+
 function classifyFileByExtension(
-  fileName: string
+  fileName: string,
 ): string {
-  const lower = fileName
-    .replace(/\\/g, "/")
-    .toLowerCase();
+  const lower = fileName.toLowerCase();
 
   if (
     /\.(png|jpg|jpeg|webp|gif|bmp|heic|avif)$/.test(
-      lower
+      lower,
     )
   ) {
     return "IMAGE";
@@ -184,7 +236,7 @@ function classifyFileByExtension(
 
   if (
     /\.(mp3|wav|ogg|m4a|aac|flac)$/.test(
-      lower
+      lower,
     )
   ) {
     return "AUDIO";
@@ -192,7 +244,7 @@ function classifyFileByExtension(
 
   if (
     /\.(mp4|mov|mkv|webm|avi)$/.test(
-      lower
+      lower,
     )
   ) {
     return "VIDEO";
@@ -200,7 +252,7 @@ function classifyFileByExtension(
 
   if (
     /\.(ttf|otf|woff|woff2)$/.test(
-      lower
+      lower,
     )
   ) {
     return "FONT";
@@ -210,586 +262,509 @@ function classifyFileByExtension(
 }
 
 // ============================================================
-// TOOL 1 — CHECK TARGET SDK
+// TOOL 1 — TARGET SDK CHECK
 // ============================================================
+
+function registerTools(server: McpServer) {
 
 server.tool(
   "check_target_sdk",
-  "Check whether an Android target SDK version is suitable for release.",
+  "Check whether an Android target SDK meets the expected Play release requirement.",
   {
-    targetSdk: z.number().int().positive(),
+    targetSdk: z
+      .number()
+      .int()
+      .positive(),
   },
   async ({ targetSdk }) => {
-    if (targetSdk >= 36) {
+    const requiredTargetSdk = 36;
+
+    if (targetSdk >= requiredTargetSdk) {
       return textResult(
         `
-🟢 TARGET SDK LOOKS GOOD
+🩺 APP RELEASE DOCTOR
+TARGET SDK CHECK
 
-Your target SDK:
-${targetSdk}
+🟢 TARGET SDK ${targetSdk} IS GOOD
 
-Recommended minimum:
-36
+Your application targets Android API ${targetSdk}.
 
-WHAT THIS MEANS
+REQUIREMENT
+-----------
+
+Minimum expected target SDK: ${requiredTargetSdk}
+
+STATUS
+------
+
+🟢 PASS
+
+Your target SDK meets the current requirement used by App Release Doctor.
+
+WHAT TO DO NEXT
 ---------------
-Your app is targeting a recent Android API level.
 
-NEXT STEP
----------
-👉 You can continue with the release checks.
-        `.trim()
+👉 Continue with the rest of your release checks.
+        `.trim(),
       );
     }
 
     return textResult(
       `
-🔴 YOUR APP NEEDS AN ANDROID SDK UPDATE
+🩺 APP RELEASE DOCTOR
+TARGET SDK CHECK
 
-Your target SDK:
-${targetSdk}
+🔴 TARGET SDK ${targetSdk} NEEDS ATTENTION
 
-Recommended:
-36 or higher
+Your application targets Android API ${targetSdk}.
 
-WHAT THIS MEANS
----------------
-Your app is targeting an older Android API level.
+REQUIREMENT
+-----------
 
-WHAT YOU SHOULD DO
-------------------
-1. Open your Flutter project.
+Minimum expected target SDK: ${requiredTargetSdk}
 
-2. Open:
-   android/app/build.gradle.kts
+STATUS
+------
 
-3. Find:
-   targetSdk = ${targetSdk}
+🔴 FAIL
 
-4. Change it to:
-   targetSdk = 36
+Your target SDK is below the expected release requirement.
 
-5. Save the file.
+WHAT TO DO
+----------
 
-6. Run the check again.
+Update your Flutter/Android project to target SDK ${requiredTargetSdk} or newer.
 
-NEXT STEP
----------
-👉 After changing targetSdk, run the Flutter project release check again.
-      `.trim()
+Then rebuild your release bundle.
+
+COMMAND
+-------
+
+flutter build appbundle --release
+      `.trim(),
     );
-  }
+  },
 );
 
 // ============================================================
-// TOOL 2 — CHECK FLUTTER PROJECT
+// TOOL 2 — FLUTTER PROJECT CHECK
 // ============================================================
 
 server.tool(
   "check_flutter_project",
-  "Check a Flutter project and explain whether it is ready for release.",
+  "Inspect a local or remotely uploaded Flutter project for Android release configuration.",
   {
-    projectPath: z.string(),
+    projectPath: z.string().optional(),
+    uploadId: z.string().optional(),
   },
-  async ({ projectPath }) => {
+  async ({
+    projectPath,
+    uploadId,
+  }) => {
+    let normalizedProjectPath = "";
+    const remoteUpload = Boolean(uploadId);
+
     try {
-      const normalizedProjectPath =
-        friendlyPath(projectPath);
+      // --------------------------------------------------------
+      // VALIDATE INPUT
+      // --------------------------------------------------------
+
+      if (
+        projectPath &&
+        uploadId
+      ) {
+        return textResult(
+          `
+🔴 TOO MANY PROJECT INPUTS
+
+Please provide either:
+
+• projectPath for a local Flutter project
+
+OR:
+
+• uploadId for an uploaded Flutter project
+
+Do not provide both.
+          `.trim(),
+        );
+      }
+
+      if (
+        !projectPath &&
+        !uploadId
+      ) {
+        return textResult(
+          `
+🔴 FLUTTER PROJECT INPUT IS MISSING
+
+I need either:
+
+• projectPath
+
+or:
+
+• uploadId
+
+For a local Flutter project, provide the project root path.
+
+For a remotely uploaded Flutter project, provide the uploadId returned by the project upload service.
+          `.trim(),
+        );
+      }
+
+      // --------------------------------------------------------
+      // REMOTE UPLOAD MODE
+      // --------------------------------------------------------
+
+      if (uploadId) {
+        const resolved =
+          await resolveProjectWorkspace(
+            uploadId,
+          );
+
+        normalizedProjectPath =
+          resolved.projectPath;
+      }
+
+      // --------------------------------------------------------
+      // LOCAL PATH MODE
+      // --------------------------------------------------------
+
+      if (projectPath) {
+        normalizedProjectPath =
+          path.normalize(
+            projectPath.trim(),
+          );
+      }
+
+      // --------------------------------------------------------
+      // VALIDATE PROJECT PATH
+      // --------------------------------------------------------
 
       if (
         !fs.existsSync(
-          normalizedProjectPath
+          normalizedProjectPath,
         )
       ) {
         return textResult(
           `
-🔴 PROJECT NOT FOUND
+🔴 FLUTTER PROJECT NOT FOUND
 
-I couldn't find a project at:
+${
+  remoteUpload
+    ? "The uploaded Flutter project workspace could not be found or has expired."
+    : `I couldn't find:
 
-${normalizedProjectPath}
+${friendlyPath(
+  normalizedProjectPath,
+)}`
+}
 
-WHAT YOU SHOULD DO
-------------------
-1. Check that the path is correct.
-2. Make sure the folder exists.
-3. Make sure you selected the main Flutter project folder.
+Please upload the project again or provide a valid Flutter project root.
+          `.trim(),
+        );
+      }
 
-A Flutter project normally contains:
+      const projectStats =
+        fs.statSync(
+          normalizedProjectPath,
+        );
 
-pubspec.yaml
-android/
-lib/
+      if (
+        !projectStats.isDirectory()
+      ) {
+        return textResult(
+          `
+🔴 INVALID PROJECT PATH
 
-NEXT STEP
----------
-👉 Select the folder containing pubspec.yaml.
-          `.trim()
+The selected path is not a directory.
+
+Please select the Flutter project root.
+          `.trim(),
         );
       }
 
       if (
         !isFlutterProject(
-          normalizedProjectPath
+          normalizedProjectPath,
         )
       ) {
         return textResult(
           `
-🔴 THIS DOESN'T LOOK LIKE A FLUTTER PROJECT
+🔴 THIS DOES NOT LOOK LIKE A FLUTTER PROJECT
 
-I couldn't find:
+I could not find:
 
 pubspec.yaml
 
-Expected location:
+Expected:
 
-${path.join(
+${friendlyPath(
   normalizedProjectPath,
-  "pubspec.yaml"
 )}
 
-WHAT YOU SHOULD DO
-------------------
-Select the main Flutter project folder.
-
-Example:
-
-D:\\reflutter\\diceapp
-          `.trim()
+Make sure you provide the Flutter project root or upload a valid Flutter project ZIP.
+          `.trim(),
         );
       }
+
+      // --------------------------------------------------------
+      // READ GRADLE
+      // --------------------------------------------------------
+
+      const gradlePath =
+        getBuildGradlePath(
+          normalizedProjectPath,
+        );
 
       const pubspecPath =
         path.join(
           normalizedProjectPath,
-          "pubspec.yaml"
+          "pubspec.yaml",
         );
 
-      const buildGradlePath =
-        getBuildGradlePath(
-          normalizedProjectPath
-        );
-
-      if (!buildGradlePath) {
-        return textResult(
-          `
-🔴 ANDROID BUILD FILE NOT FOUND
-
-I found your Flutter project, but I couldn't find:
-
-android/app/build.gradle.kts
-
-or:
-
-android/app/build.gradle
-
-WHAT YOU SHOULD DO
-------------------
-1. Open the Flutter project.
-2. Open android/app.
-3. Make sure the Android build file exists.
-
-NEXT STEP
----------
-👉 Check the Android folder and try again.
-          `.trim()
-        );
-      }
-
-      const gradleContent =
-        fs.readFileSync(
-          buildGradlePath,
-          "utf8"
-        );
-
-      const pubspecContent =
+      const pubspecText =
         fs.readFileSync(
           pubspecPath,
-          "utf8"
+          "utf8",
         );
+
+      let gradleText = "";
+
+      if (gradlePath) {
+        gradleText =
+          fs.readFileSync(
+            gradlePath,
+            "utf8",
+          );
+      }
+
+      // --------------------------------------------------------
+      // EXTRACT ANDROID VALUES
+      // --------------------------------------------------------
 
       const compileSdk =
         extractSdkValue(
-          gradleContent,
-          "compileSdk"
+          gradleText,
+          "compileSdk",
         );
 
       const targetSdk =
         extractSdkValue(
-          gradleContent,
-          "targetSdk"
+          gradleText,
+          "targetSdk",
         );
 
-      const compileSdkInherited =
-        /compileSdk\s*=?\s*flutter\.compileSdkVersion/i.test(
-          gradleContent
+      const minSdk =
+        extractSdkValue(
+          gradleText,
+          "minSdk",
         );
 
-      const targetSdkInherited =
-        /targetSdk\s*=?\s*flutter\.targetSdkVersion/i.test(
-          gradleContent
+      const namespace =
+        extractString(
+          gradleText,
+          [
+            /namespace\s*=\s*["']([^"']+)["']/i,
+            /namespace\s+["']([^"']+)["']/i,
+          ],
         );
 
       const applicationId =
         extractString(
-          gradleContent,
-          /applicationId\s*=?\s*"([^"]+)"/i
+          gradleText,
+          [
+            /applicationId\s*=\s*["']([^"']+)["']/i,
+            /applicationId\s+["']([^"']+)["']/i,
+          ],
         );
 
-      const version =
-        extractString(
-          pubspecContent,
-          /^version:\s*([^\s#]+)$/m
-        );
-
-      let versionName:
-        string | null = null;
-
-      let versionCode:
-        string | null = null;
-
-      if (version) {
-        const parts =
-          version.split("+");
-
-        versionName =
-          parts[0] ?? null;
-
-        versionCode =
-          parts[1] ?? null;
-      }
-
-      const hasReleaseSigning =
+      const releaseSigning =
         detectReleaseSigning(
-          gradleContent
+          gradleText,
         );
 
-      let flutterVersion =
-        "Unknown";
+      const flutterVersion =
+        extractString(
+          pubspecText,
+          [
+            /^version:\s*([^\r\n]+)/m,
+          ],
+        );
 
-      try {
-        const result =
-          await execAsync(
-            "flutter --version",
-            {
-              maxBuffer:
-                5 * 1024 * 1024,
-            }
-          );
-
-        const match =
-          result.stdout.match(
-            /Flutter\s+([\d.]+)/
-          );
-
-        if (match?.[1]) {
-          flutterVersion =
-            match[1];
-        }
-      } catch {
-        flutterVersion =
-          "Flutter version could not be detected";
-      }
-
-      const compileSdkOk =
-        compileSdk !== null &&
-        compileSdk >= 36;
-
-      const targetSdkOk =
-        targetSdk !== null &&
-        targetSdk >= 36;
-
-      const signingOk =
-        hasReleaseSigning;
-
-      const applicationIdOk =
-        applicationId !== null &&
-        applicationId.trim().length > 0;
-
-      const versionOk =
-        versionName !== null;
-
-      const versionCodeOk =
-        versionCode !== null &&
-        /^\d+$/.test(versionCode);
-
-      const allGood =
-        compileSdkOk &&
-        targetSdkOk &&
-        signingOk &&
-        applicationIdOk &&
-        versionOk &&
-        versionCodeOk;
+      // --------------------------------------------------------
+      // OUTPUT
+      // --------------------------------------------------------
 
       const output: string[] = [];
 
       output.push(
-        allGood
-          ? "🟢 YOUR FLUTTER PROJECT LOOKS READY"
-          : "🟡 YOUR FLUTTER PROJECT NEEDS ATTENTION"
+        "🩺 APP RELEASE DOCTOR",
+      );
+
+      output.push(
+        "FLUTTER PROJECT CHECK",
       );
 
       output.push("");
 
       output.push(
-        "I checked the important Android release settings."
-      );
-
-      output.push("");
-
-      output.push(
-        "ANDROID"
+        "PROJECT",
       );
 
       output.push(
-        "-------"
+        "-------",
       );
 
-      if (compileSdkOk) {
+      if (remoteUpload) {
         output.push(
-          `✅ compileSdk: ${compileSdk}`
-        );
-      } else if (compileSdkInherited) {
-        output.push(
-          "ℹ️ compileSdk: Flutter-managed"
-        );
-        output.push(
-          "   Doctor could not determine the exact resolved API level from this file."
+          "Source: Remote uploaded Flutter project",
         );
       } else {
         output.push(
-          `❌ compileSdk: ${
-            compileSdk ?? "not found"
-          }`
-        );
-      }
-
-      if (targetSdkOk) {
-        output.push(
-          `✅ targetSdk: ${targetSdk}`
-        );
-      } else if (targetSdkInherited) {
-        output.push(
-          "ℹ️ targetSdk: Flutter-managed"
-        );
-        output.push(
-          "   Doctor could not determine the exact resolved API level from this file."
-        );
-      } else {
-        output.push(
-          `❌ targetSdk: ${
-            targetSdk ?? "not found"
-          }`
+          `Path: ${friendlyPath(
+            normalizedProjectPath,
+          )}`,
         );
       }
 
       output.push(
-        signingOk
-          ? "✅ Release signing appears configured"
-          : "❌ Release signing is not configured"
+        "🟢 Flutter project detected",
       );
 
       output.push("");
 
       output.push(
-        "APP INFORMATION"
+        "ANDROID CONFIGURATION",
       );
 
       output.push(
-        "---------------"
+        "---------------------",
       );
 
       output.push(
-        applicationIdOk
-          ? `✅ Application ID: ${applicationId}`
-          : "❌ Application ID not found"
+        `Compile SDK: ${
+          compileSdk ?? "Not detected"
+        }`,
       );
 
       output.push(
-        versionName
-          ? `✅ Version: ${versionName}`
-          : "❌ Version not found"
+        `Target SDK: ${
+          targetSdk ?? "Not detected"
+        }`,
       );
 
       output.push(
-        versionCodeOk
-          ? `✅ Version code: ${versionCode}`
-          : "❌ Version code not found"
+        `Min SDK: ${
+          minSdk ?? "Not detected"
+        }`,
+      );
+
+      output.push(
+        `Application ID: ${
+          applicationId ??
+          "Not detected"
+        }`,
+      );
+
+      output.push(
+        `Namespace: ${
+          namespace ??
+          "Not detected"
+        }`,
       );
 
       output.push("");
 
       output.push(
-        "FLUTTER"
+        "RELEASE SIGNING",
       );
 
       output.push(
-        "-------"
+        "---------------",
       );
 
       output.push(
-        `Flutter SDK: ${flutterVersion}`
+        releaseSigning
+          ? "🟢 Release signing configuration detected."
+          : "🟡 Release signing configuration was not clearly detected.",
       );
 
       output.push("");
 
       output.push(
-        "PROJECT"
+        "FLUTTER VERSION",
       );
 
       output.push(
-        "-------"
+        "---------------",
       );
 
       output.push(
-        normalizedProjectPath
+        flutterVersion ??
+          "Version not detected.",
       );
 
       output.push("");
 
-      if (allGood) {
+      output.push(
+        "TARGET SDK STATUS",
+      );
+
+      output.push(
+        "-----------------",
+      );
+
+      if (
+        targetSdk === null
+      ) {
         output.push(
-          "WHAT THIS MEANS"
+          "🟡 Target SDK could not be detected automatically.",
         );
-
+      } else if (
+        targetSdk >= 36
+      ) {
         output.push(
-          "---------------"
-        );
-
-        output.push(
-          "🟢 The important release settings look good."
-        );
-
-        output.push("");
-
-        output.push(
-          "WHAT TO DO NEXT"
-        );
-
-        output.push(
-          "---------------"
-        );
-
-        output.push(
-          "👉 Build your release AAB."
-        );
-
-        output.push(
-          "👉 Inspect the AAB with App Release Doctor."
+          `🟢 Target SDK ${targetSdk} is good.`,
         );
       } else {
         output.push(
-          "WHAT YOU SHOULD FIX"
-        );
-
-        output.push(
-          "-------------------"
-        );
-
-        let fixNumber = 1;
-
-        if (
-          !compileSdkOk &&
-          !compileSdkInherited
-        ) {
-          output.push(
-            `${fixNumber}. Update compileSdk to 36 or higher.`
-          );
-
-          output.push(
-            "   File: android/app/build.gradle.kts"
-          );
-
-          fixNumber++;
-        }
-
-        if (
-          !targetSdkOk &&
-          !targetSdkInherited
-        ) {
-          output.push(
-            `${fixNumber}. Update targetSdk to 36 or higher.`
-          );
-
-          output.push(
-            "   File: android/app/build.gradle.kts"
-          );
-
-          fixNumber++;
-        }
-
-        if (!signingOk) {
-          output.push(
-            `${fixNumber}. Configure release signing before uploading to Google Play.`
-          );
-
-          fixNumber++;
-        }
-
-        if (!applicationIdOk) {
-          output.push(
-            `${fixNumber}. Add a valid Android application ID.`
-          );
-
-          fixNumber++;
-        }
-
-        if (!versionOk) {
-          output.push(
-            `${fixNumber}. Add a version in pubspec.yaml.`
-          );
-
-          output.push(
-            "   Example: version: 1.0.0+1"
-          );
-
-          fixNumber++;
-        }
-
-        if (!versionCodeOk) {
-          output.push(
-            `${fixNumber}. Add a numeric version code in pubspec.yaml.`
-          );
-
-          output.push(
-            "   Example: version: 1.0.0+1"
-          );
-
-          fixNumber++;
-        }
-
-        output.push("");
-
-        output.push(
-          "NEXT STEP"
-        );
-
-        output.push(
-          "---------"
-        );
-
-        output.push(
-          "👉 Fix the relevant items above."
-        );
-
-        output.push(
-          "👉 Run this check again."
+          `🔴 Target SDK ${targetSdk} is below the expected target SDK 36.`,
         );
       }
+
+      output.push("");
+
+      output.push(
+        "NEXT STEP",
+      );
+
+      output.push(
+        "---------",
+      );
+
+      output.push(
+        "👉 Run the Play Store readiness check.",
+      );
+
+      output.push(
+        "👉 Build a release AAB.",
+      );
+
+      output.push(
+        "👉 Run Smart AAB Inspection.",
+      );
 
       return textResult(
-        output.join("\n").trim()
+        output.join("\n").trim(),
       );
     } catch (error) {
       return textResult(
         `
-🔴 I COULDN'T CHECK THE PROJECT
+🔴 FLUTTER PROJECT CHECK FAILED
 
 Something went wrong while reading the Flutter project.
-
-Project:
-
-${projectPath}
 
 Error:
 
@@ -799,418 +774,570 @@ ${
     : String(error)
 }
 
-NEXT STEP
----------
-👉 Check the project path and try again.
-        `.trim()
+${
+  remoteUpload
+    ? "The uploaded Flutter project could not be inspected."
+    : `Project:
+
+${normalizedProjectPath}`
+}
+
+Please verify the project and try again.
+        `.trim(),
       );
     }
-  }
+  },
 );
 
+// ============================================================
 // ============================================================
 // TOOL 3 — PLAY STORE READINESS
 // ============================================================
 
 server.tool(
   "check_play_store_readiness",
-  "Check whether a Flutter Android project is ready for Google Play release.",
+  "Check a local or remotely uploaded Flutter project for common Android release readiness items.",
   {
-    projectPath: z.string(),
+    projectPath: z.string().optional(),
+    uploadId: z.string().optional(),
   },
-  async ({ projectPath }) => {
+  async ({
+    projectPath,
+    uploadId,
+  }) => {
+    let normalizedProjectPath = "";
+    const remoteUpload = Boolean(uploadId);
+
     try {
-      const normalizedProjectPath =
-        friendlyPath(projectPath);
+      // --------------------------------------------------------
+      // VALIDATE INPUT
+      // --------------------------------------------------------
+
+      if (
+        projectPath &&
+        uploadId
+      ) {
+        return textResult(
+          `
+🔴 TOO MANY PROJECT INPUTS
+
+Please provide either:
+
+• projectPath for a local Flutter project
+
+OR:
+
+• uploadId for an uploaded Flutter project
+
+Do not provide both.
+          `.trim(),
+        );
+      }
+
+      if (
+        !projectPath &&
+        !uploadId
+      ) {
+        return textResult(
+          `
+🔴 FLUTTER PROJECT INPUT IS MISSING
+
+I need either:
+
+• projectPath
+
+or:
+
+• uploadId
+
+For a local Flutter project, provide the project root path.
+
+For a remotely uploaded Flutter project, provide the uploadId returned by the project upload service.
+          `.trim(),
+        );
+      }
+
+      // --------------------------------------------------------
+      // REMOTE UPLOAD MODE
+      // --------------------------------------------------------
+
+      if (uploadId) {
+        const resolved =
+          await resolveProjectWorkspace(
+            uploadId,
+          );
+
+        normalizedProjectPath =
+          resolved.projectPath;
+      }
+
+      // --------------------------------------------------------
+      // LOCAL PATH MODE
+      // --------------------------------------------------------
+
+      if (projectPath) {
+        normalizedProjectPath =
+          path.normalize(
+            projectPath.trim(),
+          );
+      }
+
+      // --------------------------------------------------------
+      // VALIDATE PROJECT
+      // --------------------------------------------------------
 
       if (
         !fs.existsSync(
-          normalizedProjectPath
+          normalizedProjectPath,
         )
       ) {
         return textResult(
           `
 🔴 PROJECT NOT FOUND
 
-I couldn't find:
+${
+  remoteUpload
+    ? "The uploaded Flutter project workspace could not be found or has expired."
+    : `I couldn't find:
 
-${normalizedProjectPath}
+${friendlyPath(
+  normalizedProjectPath,
+)}`
+}
 
-NEXT STEP
----------
-👉 Select the Flutter project folder.
-          `.trim()
+Please upload the project again or provide a valid Flutter project root.
+          `.trim(),
         );
       }
 
-      const pubspecPath =
-        path.join(
+      const projectStats =
+        fs.statSync(
           normalizedProjectPath,
-          "pubspec.yaml"
         );
 
-      if (!fs.existsSync(pubspecPath)) {
+      if (
+        !projectStats.isDirectory()
+      ) {
         return textResult(
           `
-🔴 FLUTTER PROJECT NOT FOUND
+🔴 INVALID PROJECT PATH
 
-I couldn't find:
+The selected path is not a directory.
 
-pubspec.yaml
-
-Please select the main Flutter project folder.
-          `.trim()
+Please select the Flutter project root.
+          `.trim(),
         );
       }
 
-      const buildGradlePath =
+      if (
+        !isFlutterProject(
+          normalizedProjectPath,
+        )
+      ) {
+        return textResult(
+          `
+🔴 NOT A FLUTTER PROJECT
+
+pubspec.yaml was not found.
+
+Please provide the Flutter project root or upload a valid Flutter project ZIP.
+          `.trim(),
+        );
+      }
+
+      // --------------------------------------------------------
+      // READ GRADLE
+      // --------------------------------------------------------
+
+      const gradlePath =
         getBuildGradlePath(
-          normalizedProjectPath
+          normalizedProjectPath,
         );
 
-      if (!buildGradlePath) {
-        return textResult(
-          `
-🔴 ANDROID BUILD FILE NOT FOUND
+      let gradleText = "";
 
-I couldn't find:
-
-android/app/build.gradle.kts
-
-or:
-
-android/app/build.gradle
-
-Please check the Android project structure.
-          `.trim()
-        );
+      if (gradlePath) {
+        gradleText =
+          fs.readFileSync(
+            gradlePath,
+            "utf8",
+          );
       }
 
-      const gradleContent =
-        fs.readFileSync(
-          buildGradlePath,
-          "utf8"
-        );
+      // --------------------------------------------------------
+      // EXTRACT ANDROID VALUES
+      // --------------------------------------------------------
 
-      const pubspecContent =
-        fs.readFileSync(
-          pubspecPath,
-          "utf8"
+      const targetSdk =
+        extractSdkValue(
+          gradleText,
+          "targetSdk",
         );
 
       const compileSdk =
         extractSdkValue(
-          gradleContent,
-          "compileSdk"
+          gradleText,
+          "compileSdk",
         );
 
-      const targetSdk =
+      const minSdk =
         extractSdkValue(
-          gradleContent,
-          "targetSdk"
-        );
-
-      const compileSdkInherited =
-        /compileSdk\s*=?\s*flutter\.compileSdkVersion/i.test(
-          gradleContent
-        );
-
-      const targetSdkInherited =
-        /targetSdk\s*=?\s*flutter\.targetSdkVersion/i.test(
-          gradleContent
+          gradleText,
+          "minSdk",
         );
 
       const applicationId =
         extractString(
-          gradleContent,
-          /applicationId\s*=?\s*"([^"]+)"/i
+          gradleText,
+          [
+            /applicationId\s*=\s*["']([^"']+)["']/i,
+            /applicationId\s+["']([^"']+)["']/i,
+          ],
         );
-
-      const version =
-        extractString(
-          pubspecContent,
-          /^version:\s*([^\s#]+)$/m
-        );
-
-      let versionName:
-        string | null = null;
-
-      let versionCode:
-        string | null = null;
-
-      if (version) {
-        const parts =
-          version.split("+");
-
-        versionName =
-          parts[0] ?? null;
-
-        versionCode =
-          parts[1] ?? null;
-      }
 
       const signingConfigured =
         detectReleaseSigning(
-          gradleContent
+          gradleText,
         );
 
-      const checks = {
-        compileSdk:
+      // --------------------------------------------------------
+      // READ FLUTTER VERSION
+      // --------------------------------------------------------
+
+      const pubspecPath =
+        path.join(
+          normalizedProjectPath,
+          "pubspec.yaml",
+        );
+
+      const pubspecText =
+        fs.readFileSync(
+          pubspecPath,
+          "utf8",
+        );
+
+      const flutterVersion =
+        extractString(
+          pubspecText,
+          [
+            /^version:\s*([^\r\n]+)/m,
+          ],
+        );
+
+      // --------------------------------------------------------
+      // READINESS CHECKS
+      // --------------------------------------------------------
+
+      const checks: {
+        name: string;
+        passed: boolean;
+        detail: string;
+      }[] = [];
+
+      checks.push({
+        name: "Flutter project",
+        passed: true,
+        detail:
+          "pubspec.yaml detected.",
+      });
+
+      checks.push({
+        name: "Android Gradle configuration",
+        passed:
+          gradlePath !== null,
+        detail:
+          gradlePath
+            ? `Detected: ${path.basename(
+                gradlePath,
+              )}`
+            : "Android app Gradle file was not detected.",
+      });
+
+      checks.push({
+        name: "Compile SDK",
+        passed:
           compileSdk !== null &&
           compileSdk >= 36,
+        detail:
+          compileSdk === null
+            ? "Could not detect compileSdk."
+            : `compileSdk ${compileSdk}`,
+      });
 
-        targetSdk:
+      checks.push({
+        name: "Target SDK",
+        passed:
           targetSdk !== null &&
           targetSdk >= 36,
+        detail:
+          targetSdk === null
+            ? "Could not detect targetSdk."
+            : `targetSdk ${targetSdk}`,
+      });
 
-        signing:
+      checks.push({
+        name: "Application ID",
+        passed:
+          Boolean(applicationId),
+        detail:
+          applicationId ??
+          "Application ID not detected.",
+      });
+
+      checks.push({
+        name: "Release signing",
+        passed:
           signingConfigured,
+        detail:
+          signingConfigured
+            ? "Release signing configuration detected."
+            : "Release signing configuration was not clearly detected.",
+      });
 
-        applicationId:
-          applicationId !== null &&
-          applicationId.trim().length > 0,
+      // --------------------------------------------------------
+      // COUNT RESULTS
+      // --------------------------------------------------------
 
-        version:
-          versionName !== null,
+      const passedCount =
+        checks.filter(
+          (check) =>
+            check.passed,
+        ).length;
 
-        versionCode:
-          versionCode !== null &&
-          /^\d+$/.test(versionCode),
-      };
+      const failedCount =
+        checks.length -
+        passedCount;
 
-      const inheritedSdk =
-        compileSdkInherited &&
-        targetSdkInherited;
-
-      const failedChecks =
-        Object.entries(
-          checks
-        ).filter(
-          ([key, passed]) =>
-            !passed &&
-            !(
-              inheritedSdk &&
-              (
-                key === "compileSdk" ||
-                key === "targetSdk"
-              )
-            )
-        );
-
-      const ready =
-        failedChecks.length === 0;
+      // --------------------------------------------------------
+      // OUTPUT
+      // --------------------------------------------------------
 
       const output: string[] = [];
 
       output.push(
-        ready
-          ? "🟢 YOUR APP LOOKS READY FOR PLAY STORE"
-          : "🔴 YOUR APP IS NOT READY YET"
+        "🩺 APP RELEASE DOCTOR",
+      );
+
+      output.push(
+        "PLAY STORE READINESS",
       );
 
       output.push("");
 
       output.push(
-        "I checked the main Android release settings."
-      );
-
-      output.push("");
-
-      output.push(
-        "RELEASE CHECKS"
+        "PROJECT",
       );
 
       output.push(
-        "--------------"
+        "-------",
       );
 
-      if (checks.compileSdk) {
+      if (remoteUpload) {
         output.push(
-          `✅ compileSdk ${compileSdk}`
-        );
-      } else if (compileSdkInherited) {
-        output.push(
-          "ℹ️ compileSdk is managed by Flutter"
+          "Source: Remote uploaded Flutter project",
         );
       } else {
         output.push(
-          `❌ compileSdk ${
-            compileSdk ?? "not found"
-          } — needs 36 or higher`
+          `Path: ${friendlyPath(
+            normalizedProjectPath,
+          )}`,
         );
       }
 
-      if (checks.targetSdk) {
-        output.push(
-          `✅ targetSdk ${targetSdk}`
-        );
-      } else if (targetSdkInherited) {
-        output.push(
-          "ℹ️ targetSdk is managed by Flutter"
-        );
-      } else {
-        output.push(
-          `❌ targetSdk ${
-            targetSdk ?? "not found"
-          } — needs 36 or higher`
-        );
-      }
+      output.push("");
 
       output.push(
-        checks.signing
-          ? "✅ Release signing appears configured"
-          : "❌ Release signing not configured"
-      );
-
-      output.push(
-        checks.applicationId
-          ? `✅ Application ID: ${applicationId}`
-          : "❌ Application ID not found"
-      );
-
-      output.push(
-        checks.version
-          ? `✅ Version: ${versionName}`
-          : "❌ Version not found"
-      );
-
-      output.push(
-        checks.versionCode
-          ? `✅ Version code: ${versionCode}`
-          : "❌ Version code not found"
+        `RESULT: ${
+          failedCount === 0
+            ? "🟢 READY"
+            : "🟡 NEEDS REVIEW"
+        }`,
       );
 
       output.push("");
 
-      if (ready) {
+      output.push(
+        `Passed: ${passedCount}/${checks.length}`,
+      );
+
+      output.push("");
+
+      // --------------------------------------------------------
+      // INDIVIDUAL CHECKS
+      // --------------------------------------------------------
+
+      for (
+        const check of checks
+      ) {
         output.push(
-          "WHAT THIS MEANS"
+          `${
+            check.passed
+              ? "🟢"
+              : "🔴"
+          } ${check.name}`,
         );
 
         output.push(
-          "---------------"
+          `   ${check.detail}`,
         );
 
+        output.push("");
+      }
+
+      // --------------------------------------------------------
+      // DETECTED VALUES
+      // --------------------------------------------------------
+
+      output.push(
+        "DETECTED VALUES",
+      );
+
+      output.push(
+        "---------------",
+      );
+
+      output.push(
+        `Compile SDK: ${
+          compileSdk ??
+          "Not detected"
+        }`,
+      );
+
+      output.push(
+        `Target SDK: ${
+          targetSdk ??
+          "Not detected"
+        }`,
+      );
+
+      output.push(
+        `Min SDK: ${
+          minSdk ??
+          "Not detected"
+        }`,
+      );
+
+      output.push(
+        `Application ID: ${
+          applicationId ??
+          "Not detected"
+        }`,
+      );
+
+      output.push(
+        `Flutter Version: ${
+          flutterVersion ??
+          "Not detected"
+        }`,
+      );
+
+      output.push("");
+
+      // --------------------------------------------------------
+      // RELEASE SIGNING
+      // --------------------------------------------------------
+
+      output.push(
+        "RELEASE SIGNING",
+      );
+
+      output.push(
+        "---------------",
+      );
+
+      output.push(
+        signingConfigured
+          ? "🟢 Release signing configuration detected."
+          : "🟡 Release signing configuration was not clearly detected.",
+      );
+
+      output.push("");
+
+      // --------------------------------------------------------
+      // TARGET SDK STATUS
+      // --------------------------------------------------------
+
+      output.push(
+        "TARGET SDK STATUS",
+      );
+
+      output.push(
+        "-----------------",
+      );
+
+      if (
+        targetSdk === null
+      ) {
         output.push(
-          "🟢 Your project passed these release checks."
+          "🟡 Target SDK could not be detected automatically.",
+        );
+      } else if (
+        targetSdk >= 36
+      ) {
+        output.push(
+          `🟢 Target SDK ${targetSdk} is good.`,
+        );
+      } else {
+        output.push(
+          `🔴 Target SDK ${targetSdk} is below the expected target SDK 36.`,
+        );
+      }
+
+      output.push("");
+
+      // --------------------------------------------------------
+      // NEXT STEP
+      // --------------------------------------------------------
+
+      output.push(
+        "NEXT STEP",
+      );
+
+      output.push(
+        "---------",
+      );
+
+      if (
+        failedCount === 0
+      ) {
+        output.push(
+          "🟢 The project passed the current App Release Doctor readiness checks.",
         );
 
         output.push("");
 
         output.push(
-          "WHAT TO DO NEXT"
+          "👉 Build your release AAB.",
         );
 
         output.push(
-          "---------------"
-        );
-
-        output.push(
-          "👉 Build your release AAB."
-        );
-
-        output.push(
-          "👉 Inspect the AAB with the Smart AAB Doctor."
+          "👉 Run Smart AAB Inspection.",
         );
       } else {
         output.push(
-          "WHAT YOU SHOULD FIX"
+          "👉 Review the failed checks above.",
         );
 
         output.push(
-          "-------------------"
-        );
-
-        let fixNumber = 1;
-
-        if (
-          !checks.compileSdk &&
-          !compileSdkInherited
-        ) {
-          output.push(
-            `${fixNumber}. Update compileSdk to 36 or higher.`
-          );
-
-          fixNumber++;
-        }
-
-        if (
-          !checks.targetSdk &&
-          !targetSdkInherited
-        ) {
-          output.push(
-            `${fixNumber}. Update targetSdk to 36 or higher.`
-          );
-
-          fixNumber++;
-        }
-
-        if (!checks.signing) {
-          output.push(
-            `${fixNumber}. Configure release signing.`
-          );
-
-          fixNumber++;
-        }
-
-        if (!checks.applicationId) {
-          output.push(
-            `${fixNumber}. Add a valid application ID.`
-          );
-
-          fixNumber++;
-        }
-
-        if (!checks.version) {
-          output.push(
-            `${fixNumber}. Add a version in pubspec.yaml.`
-          );
-
-          fixNumber++;
-        }
-
-        if (!checks.versionCode) {
-          output.push(
-            `${fixNumber}. Add a numeric version code in pubspec.yaml.`
-          );
-
-          fixNumber++;
-        }
-
-        output.push("");
-
-        output.push(
-          "NEXT STEP"
+          "👉 Fix the relevant Android release configuration.",
         );
 
         output.push(
-          "---------"
-        );
-
-        output.push(
-          "👉 Fix the items above."
-        );
-
-        output.push(
-          "👉 Run the Play Store check again."
+          "👉 Build a fresh release AAB.",
         );
       }
-
-      output.push("");
-
-      output.push(
-        `Project: ${normalizedProjectPath}`
-      );
 
       return textResult(
-        output.join("\n").trim()
+        output
+          .join("\n")
+          .trim(),
       );
     } catch (error) {
       return textResult(
         `
-🔴 PLAY STORE CHECK FAILED
+🔴 PLAY STORE READINESS CHECK FAILED
 
-I couldn't complete the release check.
+Something went wrong while checking the Flutter project.
 
 Error:
 
@@ -1220,13 +1347,19 @@ ${
     : String(error)
 }
 
-NEXT STEP
----------
-👉 Check the project path and try again.
-        `.trim()
+${
+  remoteUpload
+    ? "The uploaded Flutter project could not be inspected. It may have expired or been removed."
+    : `Project:
+
+${normalizedProjectPath}`
+}
+
+Please verify the project and try again.
+        `.trim(),
       );
     }
-  }
+  },
 );
 
 // ============================================================
@@ -1235,65 +1368,138 @@ NEXT STEP
 
 server.tool(
   "build_release",
-  "Build a Flutter Android App Bundle in release mode and explain the result.",
+  "Build a local or remotely uploaded Flutter Android App Bundle in release mode.",
   {
-    projectPath: z.string(),
+    projectPath: z.string().optional(),
+    uploadId: z.string().optional(),
   },
-  async ({ projectPath }) => {
+  async ({
+    projectPath,
+    uploadId,
+  }) => {
+    let normalizedProjectPath = "";
+    const remoteUpload =
+      Boolean(uploadId);
+
     try {
-      const normalizedProjectPath =
-        friendlyPath(projectPath);
+      // --------------------------------------------------------
+      // VALIDATE INPUT
+      // --------------------------------------------------------
+
+      if (
+        projectPath &&
+        uploadId
+      ) {
+        return textResult(
+          `
+🔴 TOO MANY PROJECT INPUTS
+
+Please provide either:
+
+• projectPath for a local Flutter project
+
+OR:
+
+• uploadId for an uploaded Flutter project
+
+Do not provide both.
+          `.trim(),
+        );
+      }
+
+      if (
+        !projectPath &&
+        !uploadId
+      ) {
+        return textResult(
+          `
+🔴 FLUTTER PROJECT INPUT IS MISSING
+
+I need either:
+
+• projectPath
+
+or:
+
+• uploadId
+
+For a local Flutter project, provide the project root path.
+
+For a remotely uploaded Flutter project, provide the uploadId returned by the project upload service.
+          `.trim(),
+        );
+      }
+
+      // --------------------------------------------------------
+      // RESOLVE PROJECT
+      // --------------------------------------------------------
+
+      if (uploadId) {
+        const resolved =
+          await resolveProjectWorkspace(
+            uploadId,
+          );
+
+        normalizedProjectPath =
+          resolved.projectPath;
+      }
+
+      if (projectPath) {
+        normalizedProjectPath =
+          path.normalize(
+            projectPath.trim(),
+          );
+      }
+
+      // --------------------------------------------------------
+      // VALIDATE PROJECT
+      // --------------------------------------------------------
 
       if (
         !fs.existsSync(
-          normalizedProjectPath
+          normalizedProjectPath,
         )
       ) {
         return textResult(
           `
 🔴 PROJECT NOT FOUND
 
-I couldn't find:
+${
+  remoteUpload
+    ? "The uploaded Flutter project workspace could not be found or has expired."
+    : `I couldn't find:
 
-${normalizedProjectPath}
+${friendlyPath(
+  normalizedProjectPath,
+)}`
+}
 
-NEXT STEP
----------
-👉 Select the Flutter project folder.
-          `.trim()
+Please upload the project again or provide a valid Flutter project root.
+          `.trim(),
         );
       }
 
       if (
         !isFlutterProject(
-          normalizedProjectPath
+          normalizedProjectPath,
         )
       ) {
         return textResult(
           `
-🔴 THIS DOESN'T LOOK LIKE A FLUTTER PROJECT
+🔴 NOT A FLUTTER PROJECT
 
-I couldn't find:
+pubspec.yaml was not found.
 
-pubspec.yaml
-
-Please select the main Flutter project folder.
-          `.trim()
+Please provide the Flutter project root or upload a valid Flutter project ZIP.
+          `.trim(),
         );
       }
 
-      const aabPath =
-        path.join(
-          normalizedProjectPath,
-          "build",
-          "app",
-          "outputs",
-          "bundle",
-          "release",
-          "app-release.aab"
-        );
+      // --------------------------------------------------------
+      // BUILD RELEASE AAB
+      // --------------------------------------------------------
 
-      try {
+      const result =
         await execAsync(
           "flutter build appbundle --release",
           {
@@ -1301,173 +1507,207 @@ Please select the main Flutter project folder.
               normalizedProjectPath,
             maxBuffer:
               50 * 1024 * 1024,
-          }
+          },
         );
-      } catch (error) {
-        const execError =
-          error as {
-            stdout?: string;
-            stderr?: string;
-            message?: string;
-          };
 
-        const buildOutput =
-          execError.stderr ||
-          execError.stdout ||
-          execError.message ||
-          String(error);
+      const outputText =
+        `${result.stdout}\n${result.stderr}`;
 
+      // --------------------------------------------------------
+      // FIND GENERATED AAB
+      // --------------------------------------------------------
+
+      const possibleAab =
+        path.join(
+          normalizedProjectPath,
+          "build",
+          "app",
+          "outputs",
+          "bundle",
+          "release",
+          "app-release.aab",
+        );
+
+      if (
+        !fs.existsSync(
+          possibleAab,
+        )
+      ) {
         return textResult(
           `
-🔴 RELEASE BUILD FAILED
+🟠 BUILD COMMAND FINISHED
 
-Flutter could not create the release AAB.
-
-PROJECT
--------
-${normalizedProjectPath}
-
-BUILD MESSAGE
--------------
-${buildOutput}
-
-WHAT YOU SHOULD DO
-------------------
-1. Read the error above.
-2. Fix the reported problem.
-3. Run the release build again.
-
-COMMAND
--------
-flutter build appbundle --release
-          `.trim()
-        );
-      }
-
-      if (!fs.existsSync(aabPath)) {
-        return textResult(
-          `
-🔴 BUILD FINISHED, BUT THE AAB WAS NOT FOUND
-
-Flutter completed the build command, but I couldn't find:
-
-${aabPath}
-
-Check:
-
-build/app/outputs/bundle/release/
-
-NEXT STEP
----------
-👉 Find the generated .aab and run the AAB inspection.
-          `.trim()
-        );
-      }
-
-      const stats =
-        fs.statSync(aabPath);
-
-      const sizeMB =
-        formatMB(stats.size);
-
-      return textResult(
-        `
-🟢 RELEASE BUILD SUCCESSFUL
-
-Good news — your Android App Bundle was created successfully.
-
-AAB FILE
---------
-Name:
-${path.basename(aabPath)}
-
-Size:
-${sizeMB} MB
-
-Location:
-${aabPath}
-
-WHAT THIS MEANS
----------------
-Your Flutter release build completed successfully.
-
-WHAT TO DO NEXT
----------------
-👉 Run the Smart AAB Inspection.
-
-AAB:
-
-${aabPath}
-
-🟢 Flutter release build completed successfully.
-        `.trim()
-      );
-    } catch (error) {
-      return textResult(
-        `
-🔴 RELEASE BUILD FAILED
-
-Something unexpected happened.
-
-Error:
+Flutter did not produce the expected AAB at:
 
 ${
-  error instanceof Error
-    ? error.message
-    : String(error)
+  remoteUpload
+    ? "the remote project build output directory."
+    : possibleAab
 }
 
+BUILD OUTPUT
+
+${outputText.trim()}
+
+Please check the Flutter build output.
+          `.trim(),
+        );
+      }
+
+      // --------------------------------------------------------
+      // BUILD SUCCESS
+      // --------------------------------------------------------
+
+      const stats =
+        fs.statSync(
+          possibleAab,
+        );
+
+      return textResult(
+        `
+🟢 RELEASE AAB BUILT SUCCESSFULLY
+
+PROJECT
+
+-------
+
+${
+  remoteUpload
+    ? "Source: Remote uploaded Flutter project"
+    : `Path: ${friendlyPath(
+        normalizedProjectPath,
+      )}`
+}
+
+FILE
+
+----
+
+${remoteUpload
+  ? "Remote project build output: build/app/outputs/bundle/release/app-release.aab"
+  : possibleAab}
+
+SIZE
+
+----
+
+${formatMB(
+  stats.size,
+)} MB
+
+COMMAND
+
+-------
+
+flutter build appbundle --release
+
 NEXT STEP
+
 ---------
-👉 Check the Flutter project and try again.
-        `.trim()
+
+👉 Run Smart AAB Inspection on this AAB.
+        `.trim(),
+      );
+    } catch (error) {
+      const execError =
+        error as {
+          stdout?: string;
+          stderr?: string;
+          message?: string;
+        };
+
+      return textResult(
+        `
+🔴 RELEASE BUILD FAILED
+
+PROJECT
+
+-------
+
+${
+  remoteUpload
+    ? "Remote uploaded Flutter project"
+    : normalizedProjectPath
+}
+
+ERROR
+
+-----
+
+${
+  execError.stderr ||
+  execError.message ||
+  String(error)
+}
+
+WHAT TO DO
+
+----------
+
+1. Check the Flutter project configuration.
+
+2. Run:
+
+flutter clean
+
+3. Run:
+
+flutter pub get
+
+4. Try:
+
+flutter build appbundle --release
+
+${
+  remoteUpload
+    ? "\n5. If the uploaded workspace has expired, upload the Flutter project again and use the new uploadId."
+    : ""
+}
+        `.trim(),
       );
     }
-  }
+  },
 );
-
 // ============================================================
-// TOOL 5 — BASIC AAB ANALYSIS
+// TOOL 5 — ANALYZE AAB
 // ============================================================
 
 server.tool(
   "analyze_aab",
-  "Check whether an Android App Bundle exists and is readable.",
+  "Check whether a local Android App Bundle exists and is readable.",
   {
     aabPath: z.string(),
   },
   async ({ aabPath }) => {
-    try {
-      const normalizedAabPath =
-        path.normalize(
-          aabPath.trim()
-        );
+    const normalizedAabPath =
+      path.normalize(
+        aabPath.trim(),
+      );
 
+    try {
       if (
         !isAabPath(
-          normalizedAabPath
+          normalizedAabPath,
         )
       ) {
         return textResult(
           `
 🔴 I NEED THE AAB FILE
 
-You entered:
+The selected path does not point to an Android App Bundle.
 
-${normalizedAabPath}
-
-That does not look like an AAB file.
-
-An AAB file must end with:
+The file must end with:
 
 .aab
-          `.trim()
+
+👉 Select the actual .aab file.
+          `.trim(),
         );
       }
 
       if (
         !fs.existsSync(
-          normalizedAabPath
+          normalizedAabPath,
         )
       ) {
         return textResult(
@@ -1478,14 +1718,18 @@ I couldn't find:
 
 ${normalizedAabPath}
 
-Please check the path and try again.
-          `.trim()
+NEXT STEP
+
+---------
+
+👉 Check the path and try again.
+          `.trim(),
         );
       }
 
       const stats =
         fs.statSync(
-          normalizedAabPath
+          normalizedAabPath,
         );
 
       if (!stats.isFile()) {
@@ -1493,19 +1737,17 @@ Please check the path and try again.
           `
 🔴 THAT PATH IS NOT AN AAB FILE
 
-The selected path is not a file:
-
-${normalizedAabPath}
+The selected path is not a file.
 
 👉 Select the actual .aab file.
-          `.trim()
+          `.trim(),
         );
       }
 
       const fileHandle =
         fs.openSync(
           normalizedAabPath,
-          "r"
+          "r",
         );
 
       const header =
@@ -1517,11 +1759,11 @@ ${normalizedAabPath}
           header,
           0,
           4,
-          0
+          0,
         );
       } finally {
         fs.closeSync(
-          fileHandle
+          fileHandle,
         );
       }
 
@@ -1537,17 +1779,21 @@ ${normalizedAabPath}
 The file exists, but it does not have the expected ZIP/AAB structure.
 
 FILE
+
 ----
+
 ${normalizedAabPath}
 
 WHAT TO DO
+
 ----------
+
 Build a fresh release bundle:
 
 flutter build appbundle --release
 
 Then inspect the newly generated app-release.aab.
-          `.trim()
+          `.trim(),
         );
       }
 
@@ -1556,31 +1802,43 @@ Then inspect the newly generated app-release.aab.
 🟢 AAB FOUND AND READABLE
 
 FILE
+
 ----
+
 ${path.basename(
-  normalizedAabPath
+  normalizedAabPath,
 )}
 
 SIZE
+
 ----
+
 ${formatMB(
-  stats.size
+  stats.size,
 )} MB
 
 LOCATION
+
 --------
+
 ${normalizedAabPath}
 
 LAST MODIFIED
+
 -------------
+
 ${stats.mtime.toLocaleString()}
 
 WHAT THIS MEANS
+
 ---------------
+
 The file exists and has the expected ZIP-based AAB structure.
 
 WHAT TO DO NEXT
+
 ---------------
+
 👉 Run the Smart AAB Inspection.
 
 The Doctor will inspect:
@@ -1595,7 +1853,7 @@ The Doctor will inspect:
 • Large files
 • Duplicate content
 • Release risks
-        `.trim()
+        `.trim(),
       );
     } catch (error) {
       return textResult(
@@ -1604,7 +1862,7 @@ The Doctor will inspect:
 
 Something went wrong while opening:
 
-${aabPath}
+${normalizedAabPath}
 
 Error:
 
@@ -1615,12 +1873,14 @@ ${
 }
 
 NEXT STEP
+
 ---------
+
 👉 Check the file and try again.
-        `.trim()
+        `.trim(),
       );
     }
-  }
+  },
 );
 
 // ============================================================
@@ -1631,67 +1891,147 @@ server.tool(
   "inspect_aab",
   "Deeply inspect an Android App Bundle and provide a meaningful release health report.",
   {
-    aabPath: z.string(),
+    aabPath: z.string().optional(),
+    uploadId: z.string().optional(),
   },
-  async ({ aabPath }) => {
+  async ({
+    aabPath,
+    uploadId,
+  }) => {
     let tempScript:
       string | null = null;
 
+    let normalizedAabPath =
+      "";
+
+    const remoteUpload =
+      Boolean(uploadId);
+
     try {
-      const normalizedAabPath =
-        path.normalize(
-          aabPath.trim()
+      // --------------------------------------------------------
+      // RESOLVE LOCAL OR REMOTE AAB
+      // --------------------------------------------------------
+
+      if (
+        aabPath &&
+        uploadId
+      ) {
+        return textResult(
+          `
+🔴 TOO MANY AAB INPUTS
+
+Please provide either:
+
+• aabPath for a local AAB
+
+OR:
+
+• uploadId for an uploaded remote AAB
+
+Do not provide both.
+          `.trim(),
         );
+      }
+
+      if (
+        !aabPath &&
+        !uploadId
+      ) {
+        return textResult(
+          `
+🔴 AAB INPUT IS MISSING
+
+I need either:
+
+• aabPath
+
+or:
+
+• uploadId
+
+For a local AAB, provide the file path.
+
+For a remote uploaded AAB, provide the uploadId returned by the upload service.
+          `.trim(),
+        );
+      }
 
       // --------------------------------------------------------
-      // VALIDATE PATH
+      // REMOTE UPLOAD MODE
+      // --------------------------------------------------------
+
+      if (uploadId) {
+        const resolved =
+          await resolveAabWorkspace(
+            uploadId,
+          );
+
+        normalizedAabPath =
+          resolved.aabPath;
+      }
+
+      // --------------------------------------------------------
+      // LOCAL PATH MODE
+      // --------------------------------------------------------
+
+      if (aabPath) {
+        normalizedAabPath =
+          path.normalize(
+            aabPath.trim(),
+          );
+      }
+
+      // --------------------------------------------------------
+      // VALIDATE AAB PATH
       // --------------------------------------------------------
 
       if (
         !isAabPath(
-          normalizedAabPath
+          normalizedAabPath,
         )
       ) {
         return textResult(
           `
 🔴 I NEED THE AAB FILE
 
-You entered:
-
-${normalizedAabPath}
-
-That does not look like an Android App Bundle.
+The selected input does not point to an Android App Bundle.
 
 The file must end with:
 
 .aab
-          `.trim()
+          `.trim(),
         );
       }
 
       if (
         !fs.existsSync(
-          normalizedAabPath
+          normalizedAabPath,
         )
       ) {
         return textResult(
           `
 🔴 AAB FILE NOT FOUND
 
-I couldn't find:
+${
+  remoteUpload
+    ? "The uploaded AAB workspace could not be found or has expired."
+    : `I couldn't find:
 
-${normalizedAabPath}
+${normalizedAabPath}`
+}
 
 NEXT STEP
+
 ---------
-👉 Select the actual app-release.aab file.
-          `.trim()
+
+👉 Upload the AAB again and run the inspection again.
+          `.trim(),
         );
       }
 
       const fileStats =
         fs.statSync(
-          normalizedAabPath
+          normalizedAabPath,
         );
 
       if (!fileStats.isFile()) {
@@ -1699,12 +2039,10 @@ NEXT STEP
           `
 🔴 THAT PATH IS NOT AN AAB FILE
 
-The selected path is not a file:
-
-${normalizedAabPath}
+The selected input is not a file.
 
 👉 Select the actual .aab file.
-          `.trim()
+          `.trim(),
         );
       }
 
@@ -1715,20 +2053,14 @@ ${normalizedAabPath}
       tempScript =
         path.join(
           projectTempDirectory(),
-          `smart-aab-${Date.now()}.ps1`
+          `smart-aab-${Date.now()}.ps1`,
         );
 
       const escapedPath =
         normalizedAabPath.replace(
           /'/g,
-          "''"
+          "''",
         );
-
-      /*
-       * IMPORTANT:
-       * Do not use PowerShell backticks inside this
-       * JavaScript template literal.
-       */
 
       const script = `
 $ErrorActionPreference = "Stop"
@@ -1783,7 +2115,6 @@ try {
 
         Write-Output "$safeName|$($entry.Length)|$sha"
     }
-
 }
 finally {
 
@@ -1796,7 +2127,7 @@ finally {
       fs.writeFileSync(
         tempScript,
         script,
-        "utf8"
+        "utf8",
       );
 
       // --------------------------------------------------------
@@ -1812,7 +2143,7 @@ finally {
             {
               maxBuffer:
                 100 * 1024 * 1024,
-            }
+            },
           );
 
         stdout =
@@ -1833,10 +2164,16 @@ The AAB exists, but Windows could not read its contents.
 
 AAB:
 
-${normalizedAabPath}
+${
+  remoteUpload
+    ? "Uploaded remote AAB"
+    : normalizedAabPath
+}
 
 ERROR
+
 -----
+
 ${
   execError.stderr ||
   execError.message ||
@@ -1844,15 +2181,21 @@ ${
 }
 
 WHAT YOU SHOULD DO
+
 ------------------
+
 1. Make sure the AAB is not locked.
+
 2. Build a fresh release bundle.
+
 3. Try the inspection again.
 
 COMMAND
+
 -------
+
 flutter build appbundle --release
-          `.trim()
+          `.trim(),
         );
       }
 
@@ -1865,7 +2208,7 @@ flutter build appbundle --release
           .split(/\r?\n/)
           .map(
             (line) =>
-              line.trim()
+              line.trim(),
           )
           .filter(Boolean);
 
@@ -1880,12 +2223,18 @@ The file exists, but no bundle entries were returned.
 
 AAB:
 
-${normalizedAabPath}
+${
+  remoteUpload
+    ? "Uploaded remote AAB"
+    : normalizedAabPath
+}
 
 NEXT STEP
+
 ---------
+
 👉 Build a fresh AAB and try again.
-          `.trim()
+          `.trim(),
         );
       }
 
@@ -1923,40 +2272,40 @@ NEXT STEP
       };
 
       function classifyEntry(
-        name: string
+        name: string,
       ): EntryClass {
         const normalized =
           name
             .replace(
               /\\/g,
-              "/"
+              "/",
             )
             .toLowerCase();
 
         if (
           normalized.startsWith(
-            "debug/"
+            "debug/",
           ) ||
           normalized.includes(
-            "/debug/"
+            "/debug/",
           ) ||
           normalized.startsWith(
-            "symbols/"
+            "symbols/",
           ) ||
           normalized.includes(
-            "/symbols/"
+            "/symbols/",
           ) ||
           normalized.endsWith(
-            ".dbg"
+            ".dbg",
           ) ||
           normalized.endsWith(
-            ".debug"
+            ".debug",
           ) ||
           normalized.includes(
-            "debugsymbols"
+            "debugsymbols",
           ) ||
           normalized.includes(
-            "debug-symbols"
+            "debug-symbols",
           )
         ) {
           return "DEBUG_METADATA";
@@ -1964,25 +2313,25 @@ NEXT STEP
 
         if (
           normalized.startsWith(
-            "bundle-metadata/"
+            "bundle-metadata/",
           ) ||
           normalized.includes(
-            "/bundle-metadata/"
+            "/bundle-metadata/",
           ) ||
           normalized.startsWith(
-            "meta-inf/"
+            "meta-inf/",
           ) ||
           normalized.includes(
-            "/meta-inf/"
+            "/meta-inf/",
           ) ||
           normalized.endsWith(
-            ".kotlin_metadata"
+            ".kotlin_metadata",
           ) ||
           normalized.endsWith(
-            ".kotlin_module"
+            ".kotlin_module",
           ) ||
           normalized.endsWith(
-            ".version"
+            ".version",
           )
         ) {
           return "METADATA";
@@ -1990,7 +2339,7 @@ NEXT STEP
 
         if (
           normalized.includes(
-            "flutter_assets/"
+            "flutter_assets/",
           )
         ) {
           return "ASSET";
@@ -1998,7 +2347,7 @@ NEXT STEP
 
         if (
           normalized.endsWith(
-            ".so"
+            ".so",
           )
         ) {
           return "NATIVE";
@@ -2006,7 +2355,7 @@ NEXT STEP
 
         if (
           normalized.endsWith(
-            ".dex"
+            ".dex",
           )
         ) {
           return "DEX";
@@ -2014,10 +2363,10 @@ NEXT STEP
 
         if (
           normalized.startsWith(
-            "base/"
+            "base/",
           ) ||
           normalized.startsWith(
-            "feature/"
+            "feature/",
           )
         ) {
           return "APP";
@@ -2036,8 +2385,7 @@ NEXT STEP
           line.indexOf("|");
 
         if (
-          firstSeparator ===
-          -1
+          firstSeparator === -1
         ) {
           continue;
         }
@@ -2045,32 +2393,30 @@ NEXT STEP
         const secondSeparator =
           line.indexOf(
             "|",
-            firstSeparator + 1
+            firstSeparator + 1,
           );
 
         const name =
           line.substring(
             0,
-            firstSeparator
+            firstSeparator,
           );
 
         const sizeText =
-          secondSeparator ===
-          -1
+          secondSeparator === -1
             ? line.substring(
-                firstSeparator + 1
+                firstSeparator + 1,
               )
             : line.substring(
                 firstSeparator + 1,
-                secondSeparator
+                secondSeparator,
               );
 
         const sha256 =
-          secondSeparator ===
-          -1
+          secondSeparator === -1
             ? ""
             : line.substring(
-                secondSeparator + 1
+                secondSeparator + 1,
               );
 
         const size =
@@ -2084,14 +2430,14 @@ NEXT STEP
           name,
           size:
             Number.isFinite(
-              size
+              size,
             )
               ? size
               : 0,
           sha256,
           entryClass:
             classifyEntry(
-              name
+              name,
             ),
         });
       }
@@ -2107,7 +2453,7 @@ NEXT STEP
         entries.reduce(
           (sum, entry) =>
             sum + entry.size,
-          0
+          0,
         );
 
       const aabSize =
@@ -2119,21 +2465,21 @@ NEXT STEP
             entry.entryClass !==
               "DEBUG_METADATA" &&
             entry.entryClass !==
-              "METADATA"
+              "METADATA",
         );
 
       const debugMetadataEntries =
         entries.filter(
           (entry) =>
             entry.entryClass ===
-            "DEBUG_METADATA"
+            "DEBUG_METADATA",
         );
 
       const metadataEntries =
         entries.filter(
           (entry) =>
             entry.entryClass ===
-            "METADATA"
+            "METADATA",
         );
 
       // --------------------------------------------------------
@@ -2146,58 +2492,58 @@ NEXT STEP
             entry.name
               .replace(
                 /\\/g,
-                "/"
+                "/",
               )
               .toLowerCase()
               .includes(
-                "flutter_assets/"
-              )
+                "flutter_assets/",
+              ),
         );
 
       const images =
         meaningfulEntries.filter(
           (entry) =>
             /\.(png|jpg|jpeg|webp|gif|bmp|heic|avif)$/i.test(
-              entry.name
-            )
+              entry.name,
+            ),
         );
 
       const audio =
         meaningfulEntries.filter(
           (entry) =>
             /\.(mp3|wav|ogg|m4a|aac|flac)$/i.test(
-              entry.name
-            )
+              entry.name,
+            ),
         );
 
       const videos =
         meaningfulEntries.filter(
           (entry) =>
             /\.(mp4|mov|mkv|webm|avi)$/i.test(
-              entry.name
-            )
+              entry.name,
+            ),
         );
 
       const fonts =
         meaningfulEntries.filter(
           (entry) =>
             /\.(ttf|otf|woff|woff2)$/i.test(
-              entry.name
-            )
+              entry.name,
+            ),
         );
 
       const nativeLibraries =
         entries.filter(
           (entry) =>
             entry.entryClass ===
-            "NATIVE"
+            "NATIVE",
         );
 
       const dexFiles =
         entries.filter(
           (entry) =>
             entry.entryClass ===
-            "DEX"
+            "DEX",
         );
 
       // --------------------------------------------------------
@@ -2208,35 +2554,35 @@ NEXT STEP
         images.reduce(
           (sum, entry) =>
             sum + entry.size,
-          0
+          0,
         );
 
       const audioSize =
         audio.reduce(
           (sum, entry) =>
             sum + entry.size,
-          0
+          0,
         );
 
       const videoSize =
         videos.reduce(
           (sum, entry) =>
             sum + entry.size,
-          0
+          0,
         );
 
       const nativeSize =
         nativeLibraries.reduce(
           (sum, entry) =>
             sum + entry.size,
-          0
+          0,
         );
 
       const meaningfulContentSize =
         meaningfulEntries.reduce(
           (sum, entry) =>
             sum + entry.size,
-          0
+          0,
         );
 
       // --------------------------------------------------------
@@ -2244,59 +2590,47 @@ NEXT STEP
       // --------------------------------------------------------
 
       const largestFiles =
-        [
-          ...meaningfulEntries,
-        ]
+        [...meaningfulEntries]
           .sort(
             (a, b) =>
-              b.size -
-              a.size
+              b.size - a.size,
           )
           .slice(
             0,
-            15
+            15,
           );
 
       const largestImages =
-        [
-          ...images,
-        ]
+        [...images]
           .sort(
             (a, b) =>
-              b.size -
-              a.size
+              b.size - a.size,
           )
           .slice(
             0,
-            10
+            10,
           );
 
       const largestAudio =
-        [
-          ...audio,
-        ]
+        [...audio]
           .sort(
             (a, b) =>
-              b.size -
-              a.size
+              b.size - a.size,
           )
           .slice(
             0,
-            10
+            10,
           );
 
       const largestVideos =
-        [
-          ...videos,
-        ]
+        [...videos]
           .sort(
             (a, b) =>
-              b.size -
-              a.size
+              b.size - a.size,
           )
           .slice(
             0,
-            5
+            5,
           );
 
       // --------------------------------------------------------
@@ -2312,35 +2646,33 @@ NEXT STEP
       for (
         const entry of meaningfulEntries
       ) {
-        if (
-          !entry.sha256
-        ) {
+        if (!entry.sha256) {
           continue;
         }
 
         const existing =
           hashGroups.get(
-            entry.sha256
+            entry.sha256,
           );
 
         if (existing) {
           existing.push(
-            entry
+            entry,
           );
         } else {
           hashGroups.set(
             entry.sha256,
-            [entry]
+            [entry],
           );
         }
       }
 
       const duplicateGroups =
         Array.from(
-          hashGroups.values()
+          hashGroups.values(),
         ).filter(
           (group) =>
-            group.length > 1
+            group.length > 1,
         );
 
       let duplicateBytes =
@@ -2371,16 +2703,22 @@ NEXT STEP
       for (
         const entry of nativeLibraries
       ) {
+        const normalizedName =
+          entry.name.replace(
+            /\\/g,
+            "/",
+          );
+
         const match =
-          entry.name.match(
-            /(?:^|\/)base\/lib\/([^/]+)\//
+          normalizedName.match(
+            /(?:^|\/)base\/lib\/([^/]+)\//i,
           );
 
         if (
           match?.[1]
         ) {
           architectures.add(
-            match[1]
+            match[1],
           );
         }
       }
@@ -2392,18 +2730,16 @@ NEXT STEP
       const findings:
         Finding[] = [];
 
-      // Base manifest
-
       const hasBaseManifest =
         entries.some(
           (entry) =>
             entry.name
               .replace(
                 /\\/g,
-                "/"
+                "/",
               )
               .toLowerCase() ===
-            "base/manifest/androidmanifest.xml"
+            "base/manifest/androidmanifest.xml",
         );
 
       if (
@@ -2422,8 +2758,6 @@ NEXT STEP
             "Verify that this is a complete release AAB and rebuild it with flutter build appbundle --release.",
         });
       }
-
-      // Executable content
 
       if (
         dexFiles.length ===
@@ -2445,15 +2779,13 @@ NEXT STEP
         });
       }
 
-      // Very large images
-
       const veryLargeImages =
         images.filter(
           (image) =>
             image.size >=
             10 *
               1024 *
-              1024
+              1024,
         );
 
       const largeImages =
@@ -2462,7 +2794,7 @@ NEXT STEP
             image.size >=
             2 *
               1024 *
-              1024
+              1024,
         );
 
       if (
@@ -2473,16 +2805,16 @@ NEXT STEP
           veryLargeImages
             .slice(
               0,
-              3
+              3,
             )
             .map(
               (image) =>
                 `${formatMB(
-                  image.size
-                )} MB — ${image.name}`
+                  image.size,
+                )} MB — ${image.name}`,
             )
             .join(
-              "\n   "
+              "\n   ",
             );
 
         findings.push({
@@ -2505,16 +2837,16 @@ NEXT STEP
           largeImages
             .slice(
               0,
-              3
+              3,
             )
             .map(
               (image) =>
                 `${formatMB(
-                  image.size
-                )} MB — ${image.name}`
+                  image.size,
+                )} MB — ${image.name}`,
             )
             .join(
-              "\n   "
+              "\n   ",
             );
 
         findings.push({
@@ -2531,15 +2863,13 @@ NEXT STEP
         });
       }
 
-      // Audio
-
       const veryLargeAudio =
         audio.filter(
           (sound) =>
             sound.size >=
             10 *
               1024 *
-              1024
+              1024,
         );
 
       const largeAudio =
@@ -2548,7 +2878,7 @@ NEXT STEP
             sound.size >=
             5 *
               1024 *
-              1024
+              1024,
         );
 
       if (
@@ -2559,16 +2889,16 @@ NEXT STEP
           veryLargeAudio
             .slice(
               0,
-              3
+              3,
             )
             .map(
               (sound) =>
                 `${formatMB(
-                  sound.size
-                )} MB — ${sound.name}`
+                  sound.size,
+                )} MB — ${sound.name}`,
             )
             .join(
-              "\n   "
+              "\n   ",
             );
 
         findings.push({
@@ -2591,16 +2921,16 @@ NEXT STEP
           largeAudio
             .slice(
               0,
-              3
+              3,
             )
             .map(
               (sound) =>
                 `${formatMB(
-                  sound.size
-                )} MB — ${sound.name}`
+                  sound.size,
+                )} MB — ${sound.name}`,
             )
             .join(
-              "\n   "
+              "\n   ",
             );
 
         findings.push({
@@ -2617,15 +2947,13 @@ NEXT STEP
         });
       }
 
-      // Videos
-
       const veryLargeVideos =
         videos.filter(
           (video) =>
             video.size >=
             50 *
               1024 *
-              1024
+              1024,
         );
 
       const largeVideos =
@@ -2634,7 +2962,7 @@ NEXT STEP
             video.size >=
             20 *
               1024 *
-              1024
+              1024,
         );
 
       if (
@@ -2645,16 +2973,16 @@ NEXT STEP
           veryLargeVideos
             .slice(
               0,
-              3
+              3,
             )
             .map(
               (video) =>
                 `${formatMB(
-                  video.size
-                )} MB — ${video.name}`
+                  video.size,
+                )} MB — ${video.name}`,
             )
             .join(
-              "\n   "
+              "\n   ",
             );
 
         findings.push({
@@ -2677,16 +3005,16 @@ NEXT STEP
           largeVideos
             .slice(
               0,
-              3
+              3,
             )
             .map(
               (video) =>
                 `${formatMB(
-                  video.size
-                )} MB — ${video.name}`
+                  video.size,
+                )} MB — ${video.name}`,
             )
             .join(
-              "\n   "
+              "\n   ",
             );
 
         findings.push({
@@ -2702,8 +3030,6 @@ NEXT STEP
             "Review video encoding and resolution if reducing application size is important.",
         });
       }
-
-      // Duplicate content
 
       if (
         duplicateGroups.length >
@@ -2722,7 +3048,7 @@ NEXT STEP
             "Significant duplicate content detected",
           reason:
             `${duplicateGroups.length} duplicate group(s) represent approximately ${formatMB(
-              duplicateBytes
+              duplicateBytes,
             )} MB of repeated content.`,
           action:
             "Check whether the repeated assets are intentionally included more than once.",
@@ -2744,14 +3070,12 @@ NEXT STEP
             "Duplicate content detected",
           reason:
             `${duplicateGroups.length} duplicate group(s) represent approximately ${formatMB(
-              duplicateBytes
+              duplicateBytes,
             )} MB of repeated content.`,
           action:
             "Review the duplicates if you want to reduce the application footprint.",
         });
       }
-
-      // Overall content size
 
       if (
         meaningfulContentSize >
@@ -2768,7 +3092,7 @@ NEXT STEP
             "Large amount of application content",
           reason:
             `Meaningful application content totals approximately ${formatMB(
-              meaningfulContentSize
+              meaningfulContentSize,
             )} MB uncompressed.`,
           action:
             "Review the largest assets and remove or compress anything the app does not need.",
@@ -2788,14 +3112,12 @@ NEXT STEP
             "Application content is fairly large",
           reason:
             `Meaningful application content totals approximately ${formatMB(
-              meaningfulContentSize
+              meaningfulContentSize,
             )} MB uncompressed.`,
           action:
             "Review large assets if reducing the application footprint is important.",
         });
       }
-
-      // Large non-media file
 
       const largestNonMediaFile =
         largestFiles.find(
@@ -2803,8 +3125,8 @@ NEXT STEP
             entry.entryClass !==
               "NATIVE" &&
             !/\.(png|jpg|jpeg|webp|gif|bmp|heic|avif|mp3|wav|ogg|m4a|aac|flac|mp4|mov|mkv|webm|avi)$/i.test(
-              entry.name
-            )
+              entry.name,
+            ),
         );
 
       if (
@@ -2823,14 +3145,12 @@ NEXT STEP
             "One particularly large application file was found",
           reason:
             `${largestNonMediaFile.name} is ${formatMB(
-              largestNonMediaFile.size
+              largestNonMediaFile.size,
             )} MB.`,
           action:
             "Review whether this file really needs to be bundled at this size.",
         });
       }
-
-      // Architecture information
 
       if (
         architectures.size >=
@@ -2845,16 +3165,14 @@ NEXT STEP
             "Multiple Android architectures found",
           reason:
             `The bundle contains: ${Array.from(
-              architectures
+              architectures,
             ).join(
-              ", "
+              ", ",
             )}.`,
           action:
             "This can be normal for Flutter apps. Keep the architectures your app needs to support.",
         });
       }
-
-      // Native libraries
 
       if (
         nativeLibraries.length >
@@ -2869,14 +3187,12 @@ NEXT STEP
             "Native Android libraries found",
           reason:
             `The AAB contains ${nativeLibraries.length} native library file(s), using approximately ${formatMB(
-              nativeSize
+              nativeSize,
             )} MB uncompressed.`,
           action:
             "This is normal for Flutter applications and many Flutter plugins.",
         });
       }
-
-      // Debug metadata
 
       if (
         debugMetadataEntries.length >
@@ -2904,29 +3220,28 @@ NEXT STEP
         findings.filter(
           (finding) =>
             finding.kind ===
-            "PROBLEM"
+            "PROBLEM",
         );
 
       const optimizationFindings =
         findings.filter(
           (finding) =>
             finding.kind ===
-            "OPTIMIZATION"
+            "OPTIMIZATION",
         );
 
       const informationFindings =
         findings.filter(
           (finding) =>
             finding.kind ===
-            "INFO"
+            "INFO",
         );
 
       // --------------------------------------------------------
       // SCORE
       // --------------------------------------------------------
 
-      let score =
-        100;
+      let score = 100;
 
       let highProblemCount =
         0;
@@ -2975,8 +3290,8 @@ NEXT STEP
           0,
           Math.min(
             100,
-            score
-          )
+            score,
+          ),
         );
 
       let healthLabel =
@@ -3011,161 +3326,149 @@ NEXT STEP
         string[] = [];
 
       output.push(
-        "🩺 APP RELEASE DOCTOR"
+        "🩺 APP RELEASE DOCTOR",
       );
 
       output.push(
-        "SMART AAB INSPECTION"
-      );
-
-      output.push("");
-
-      output.push(
-        "I opened your AAB and checked its structure, application content, release risks, and optional optimizations."
+        "SMART AAB INSPECTION",
       );
 
       output.push("");
 
       output.push(
-        "RELEASE HEALTH"
-      );
-
-      output.push(
-        "--------------"
-      );
-
-      output.push(
-        `${healthLabel}  ${score}/100`
+        "I opened your AAB and checked its structure, application content, release risks, and optional optimizations.",
       );
 
       output.push("");
 
       output.push(
-        "The score measures actual release risks detected inside the AAB."
+        "RELEASE HEALTH",
       );
 
       output.push(
-        "Optimization suggestions do NOT reduce the score."
+        "--------------",
       );
 
       output.push(
-        "Normal build metadata does NOT reduce the score."
-      );
-
-      output.push(
-        "This is NOT a Google Play approval score."
+        `${healthLabel}  ${score}/100`,
       );
 
       output.push("");
 
-      // --------------------------------------------------------
-      // AAB
-      // --------------------------------------------------------
-
       output.push(
-        "AAB"
+        "The score measures actual release risks detected inside the AAB.",
       );
 
       output.push(
-        "---"
+        "Optimization suggestions do NOT reduce the score.",
+      );
+
+      output.push(
+        "Normal build metadata does NOT reduce the score.",
+      );
+
+      output.push(
+        "This is NOT a Google Play approval score.",
+      );
+
+      output.push("");
+
+      output.push(
+        "AAB",
+      );
+
+      output.push(
+        "---",
       );
 
       output.push(
         `File: ${path.basename(
-          normalizedAabPath
-        )}`
+          normalizedAabPath,
+        )}`,
       );
 
       output.push(
         `Upload file size: ${formatMB(
-          aabSize
-        )} MB`
+          aabSize,
+        )} MB`,
       );
 
       output.push(
         `Uncompressed contents: ${formatMB(
-          totalUncompressedSize
-        )} MB`
+          totalUncompressedSize,
+        )} MB`,
       );
 
       output.push(
         `Meaningful content: ${formatMB(
-          meaningfulContentSize
-        )} MB`
+          meaningfulContentSize,
+        )} MB`,
       );
 
       output.push(
-        `Files inside bundle: ${totalEntries}`
+        `Files inside bundle: ${totalEntries}`,
+      );
+
+      output.push("");
+
+      output.push(
+        "Note: uncompressed content size is a diagnostic metric. It is not the same as the final Google Play download size.",
       );
 
       output.push("");
 
       output.push(
-        "Note: uncompressed content size is a diagnostic metric. It is not the same as the final Google Play download size."
-      );
-
-      output.push("");
-
-      // --------------------------------------------------------
-      // CONTENT SUMMARY
-      // --------------------------------------------------------
-
-      output.push(
-        "CONTENT SUMMARY"
+        "CONTENT SUMMARY",
       );
 
       output.push(
-        "---------------"
+        "---------------",
       );
 
       output.push(
-        `📦 Flutter assets: ${flutterAssets.length}`
+        `📦 Flutter assets: ${flutterAssets.length}`,
       );
 
       output.push(
         `🖼️ Images: ${images.length} (${formatMB(
-          imageSize
-        )} MB)`
+          imageSize,
+        )} MB)`,
       );
 
       output.push(
         `🔊 Audio: ${audio.length} (${formatMB(
-          audioSize
-        )} MB)`
+          audioSize,
+        )} MB)`,
       );
 
       output.push(
         `🎬 Videos: ${videos.length} (${formatMB(
-          videoSize
-        )} MB)`
+          videoSize,
+        )} MB)`,
       );
 
       output.push(
         `⚙️ Native libraries: ${nativeLibraries.length} (${formatMB(
-          nativeSize
-        )} MB)`
+          nativeSize,
+        )} MB)`,
       );
 
       output.push(
-        `🔤 Fonts: ${fonts.length}`
+        `🔤 Fonts: ${fonts.length}`,
       );
 
       output.push(
-        `📱 DEX files: ${dexFiles.length}`
+        `📱 DEX files: ${dexFiles.length}`,
       );
 
       output.push("");
 
-      // --------------------------------------------------------
-      // ARCHITECTURES
-      // --------------------------------------------------------
-
       output.push(
-        "ANDROID ARCHITECTURES"
+        "ANDROID ARCHITECTURES",
       );
 
       output.push(
-        "---------------------"
+        "---------------------",
       );
 
       if (
@@ -3174,29 +3477,25 @@ NEXT STEP
       ) {
         output.push(
           Array.from(
-            architectures
+            architectures,
           ).join(
-            ", "
-          )
+            ", ",
+          ),
         );
       } else {
         output.push(
-          "No native Android architectures detected."
+          "No native Android architectures detected.",
         );
       }
 
       output.push("");
 
-      // --------------------------------------------------------
-      // NATIVE FOOTPRINT
-      // --------------------------------------------------------
-
       output.push(
-        "NATIVE LIBRARY FOOTPRINT"
+        "NATIVE LIBRARY FOOTPRINT",
       );
 
       output.push(
-        "------------------------"
+        "------------------------",
       );
 
       if (
@@ -3204,27 +3503,25 @@ NEXT STEP
         0
       ) {
         output.push(
-          `Total native libraries: ${nativeLibraries.length}`
+          `Total native libraries: ${nativeLibraries.length}`,
         );
 
         output.push(
           `Uncompressed native size: ${formatMB(
-            nativeSize
-          )} MB`
+            nativeSize,
+          )} MB`,
         );
 
         const largestNative =
-          [
-            ...nativeLibraries,
-          ]
+          [...nativeLibraries]
             .sort(
               (a, b) =>
                 b.size -
-                a.size
+                a.size,
             )
             .slice(
               0,
-              6
+              6,
             );
 
         for (
@@ -3232,40 +3529,36 @@ NEXT STEP
         ) {
           output.push(
             `• ${formatMB(
-              nativeFile.size
-            )} MB — ${nativeFile.name}`
+              nativeFile.size,
+            )} MB — ${nativeFile.name}`,
           );
         }
       } else {
         output.push(
-          "No native libraries detected."
+          "No native libraries detected.",
         );
       }
 
       output.push("");
 
-      // --------------------------------------------------------
-      // RELEASE RISKS
-      // --------------------------------------------------------
-
       output.push(
-        "RELEASE RISKS"
+        "RELEASE RISKS",
       );
 
       output.push(
-        "-------------"
+        "-------------",
       );
 
       output.push(
-        `🔴 High: ${highProblemCount}`
+        `🔴 High: ${highProblemCount}`,
       );
 
       output.push(
-        `🟠 Medium: ${mediumProblemCount}`
+        `🟠 Medium: ${mediumProblemCount}`,
       );
 
       output.push(
-        `🟡 Low: ${lowProblemCount}`
+        `🟡 Low: ${lowProblemCount}`,
       );
 
       output.push("");
@@ -3275,11 +3568,10 @@ NEXT STEP
         0
       ) {
         output.push(
-          "🟢 No obvious release risks were detected from the AAB contents."
+          "🟢 No obvious release risks were detected from the AAB contents.",
         );
       } else {
-        let number =
-          1;
+        let number = 1;
 
         for (
           const finding of problemFindings
@@ -3302,15 +3594,15 @@ NEXT STEP
           }
 
           output.push(
-            `${number}. ${icon} ${finding.title}`
+            `${number}. ${icon} ${finding.title}`,
           );
 
           output.push(
-            `   Why: ${finding.reason}`
+            `   Why: ${finding.reason}`,
           );
 
           output.push(
-            `   What to do: ${finding.action}`
+            `   What to do: ${finding.action}`,
           );
 
           output.push("");
@@ -3319,20 +3611,16 @@ NEXT STEP
         }
       }
 
-      // --------------------------------------------------------
-      // OPTIMIZATION
-      // --------------------------------------------------------
-
       output.push(
-        "OPTIMIZATION SUGGESTIONS"
+        "OPTIMIZATION SUGGESTIONS",
       );
 
       output.push(
-        "------------------------"
+        "------------------------",
       );
 
       output.push(
-        `🟡 ${optimizationFindings.length} suggestion(s)`
+        `🟡 ${optimizationFindings.length} suggestion(s)`,
       );
 
       output.push("");
@@ -3342,11 +3630,10 @@ NEXT STEP
         0
       ) {
         output.push(
-          "🟢 No obvious size optimization opportunities were detected."
+          "🟢 No obvious size optimization opportunities were detected.",
         );
       } else {
-        let number =
-          1;
+        let number = 1;
 
         for (
           const finding of optimizationFindings
@@ -3358,15 +3645,15 @@ NEXT STEP
               : "🟡";
 
           output.push(
-            `${number}. ${icon} ${finding.title}`
+            `${number}. ${icon} ${finding.title}`,
           );
 
           output.push(
-            `   Why: ${finding.reason}`
+            `   Why: ${finding.reason}`,
           );
 
           output.push(
-            `   Suggestion: ${finding.action}`
+            `   Suggestion: ${finding.action}`,
           );
 
           output.push("");
@@ -3375,42 +3662,34 @@ NEXT STEP
         }
       }
 
-      // --------------------------------------------------------
-      // BUILD METADATA
-      // --------------------------------------------------------
-
       output.push(
-        "BUILD / DEBUG METADATA"
+        "BUILD / DEBUG METADATA",
       );
 
       output.push(
-        "-----------------------"
+        "-----------------------",
       );
 
       output.push(
-        `ℹ️ Debug metadata ignored: ${debugMetadataEntries.length}`
+        `ℹ️ Debug metadata ignored: ${debugMetadataEntries.length}`,
       );
 
       output.push(
-        `ℹ️ Normal metadata ignored: ${metadataEntries.length}`
+        `ℹ️ Normal metadata ignored: ${metadataEntries.length}`,
       );
 
       output.push(
-        "These entries are excluded from release-risk and optimization calculations."
+        "These entries are excluded from release-risk and optimization calculations.",
       );
 
       output.push("");
 
-      // --------------------------------------------------------
-      // INFORMATION
-      // --------------------------------------------------------
-
       output.push(
-        "NORMAL / INFORMATIONAL"
+        "NORMAL / INFORMATIONAL",
       );
 
       output.push(
-        "----------------------"
+        "----------------------",
       );
 
       if (
@@ -3418,38 +3697,34 @@ NEXT STEP
         0
       ) {
         output.push(
-          "No additional informational findings."
+          "No additional informational findings.",
         );
       } else {
         for (
           const finding of informationFindings
         ) {
           output.push(
-            `ℹ️ ${finding.title}`
+            `ℹ️ ${finding.title}`,
           );
 
           output.push(
-            `   ${finding.reason}`
+            `   ${finding.reason}`,
           );
 
           output.push(
-            `   ${finding.action}`
+            `   ${finding.action}`,
           );
 
           output.push("");
         }
       }
 
-      // --------------------------------------------------------
-      // LARGEST FILES
-      // --------------------------------------------------------
-
       output.push(
-        "TOP 10 LARGEST MEANINGFUL FILES"
+        "TOP 10 LARGEST MEANINGFUL FILES",
       );
 
       output.push(
-        "-------------------------------"
+        "-------------------------------",
       );
 
       if (
@@ -3457,7 +3732,7 @@ NEXT STEP
         0
       ) {
         output.push(
-          "No meaningful application files detected."
+          "No meaningful application files detected.",
         );
       } else {
         for (
@@ -3465,7 +3740,7 @@ NEXT STEP
           i <
           Math.min(
             10,
-            largestFiles.length
+            largestFiles.length,
           );
           i++
         ) {
@@ -3478,24 +3753,20 @@ NEXT STEP
 
           output.push(
             `${i + 1}. ${formatMB(
-              entry.size
-            )} MB — ${entry.name}`
+              entry.size,
+            )} MB — ${entry.name}`,
           );
         }
       }
 
       output.push("");
 
-      // --------------------------------------------------------
-      // DUPLICATES
-      // --------------------------------------------------------
-
       output.push(
-        "DUPLICATE FILE CHECK"
+        "DUPLICATE FILE CHECK",
       );
 
       output.push(
-        "--------------------"
+        "--------------------",
       );
 
       if (
@@ -3503,17 +3774,17 @@ NEXT STEP
         0
       ) {
         output.push(
-          "🟢 No duplicate application content detected."
+          "🟢 No duplicate application content detected.",
         );
       } else {
         output.push(
-          `Found ${duplicateGroups.length} duplicate group(s).`
+          `Found ${duplicateGroups.length} duplicate group(s).`,
         );
 
         output.push(
           `Potential repeated content: ${formatMB(
-            duplicateBytes
-          )} MB`
+            duplicateBytes,
+          )} MB`,
         );
 
         output.push("");
@@ -3521,7 +3792,7 @@ NEXT STEP
         const previewGroups =
           duplicateGroups.slice(
             0,
-            5
+            5,
           );
 
         for (
@@ -3538,7 +3809,7 @@ NEXT STEP
           }
 
           output.push(
-            `Group ${i + 1}:`
+            `Group ${i + 1}:`,
           );
 
           for (
@@ -3546,8 +3817,8 @@ NEXT STEP
           ) {
             output.push(
               `  ${formatMB(
-                entry.size
-              )} MB — ${entry.name}`
+                entry.size,
+              )} MB — ${entry.name}`,
             );
           }
 
@@ -3559,23 +3830,19 @@ NEXT STEP
           5
         ) {
           output.push(
-            `Showing first 5 of ${duplicateGroups.length} duplicate groups.`
+            `Showing first 5 of ${duplicateGroups.length} duplicate groups.`,
           );
 
           output.push("");
         }
       }
 
-      // --------------------------------------------------------
-      // WHAT THIS MEANS
-      // --------------------------------------------------------
-
       output.push(
-        "WHAT THIS MEANS"
+        "WHAT THIS MEANS",
       );
 
       output.push(
-        "---------------"
+        "---------------",
       );
 
       if (
@@ -3583,121 +3850,109 @@ NEXT STEP
         0
       ) {
         output.push(
-          "🔴 Important release risks were detected. Review them before release."
+          "🔴 Important release risks were detected. Review them before release.",
         );
       } else if (
         mediumProblemCount >
         0
       ) {
         output.push(
-          "🟠 Meaningful release risks were detected. Review them before publishing."
+          "🟠 Meaningful release risks were detected. Review them before publishing.",
         );
       } else if (
         lowProblemCount >
         0
       ) {
         output.push(
-          "🟡 Minor release risks were detected."
+          "🟡 Minor release risks were detected.",
         );
       } else if (
         optimizationFindings.length >
         0
       ) {
         output.push(
-          "🟢 No obvious release risks were detected. The remaining findings are optional optimizations."
+          "🟢 No obvious release risks were detected. The remaining findings are optional optimizations.",
         );
       } else {
         output.push(
-          "🟢 No obvious release risks or major optimization opportunities were detected."
+          "🟢 No obvious release risks or major optimization opportunities were detected.",
         );
       }
 
       output.push("");
 
-      // --------------------------------------------------------
-      // SCORE
-      // --------------------------------------------------------
-
       output.push(
-        "SCORE EXPLANATION"
+        "SCORE EXPLANATION",
       );
 
       output.push(
-        "-----------------"
+        "-----------------",
       );
 
       output.push(
-        "HIGH release problem: -30 points"
+        "HIGH release problem: -30 points",
       );
 
       output.push(
-        "MEDIUM release problem: -12 points"
+        "MEDIUM release problem: -12 points",
       );
 
       output.push(
-        "LOW release problem: -4 points"
+        "LOW release problem: -4 points",
       );
 
       output.push(
-        "Optimization suggestion: 0 points"
+        "Optimization suggestion: 0 points",
       );
 
       output.push(
-        "Informational finding: 0 points"
+        "Informational finding: 0 points",
       );
 
       output.push("");
 
       output.push(
-        `Current release problems affecting score: ${problemFindings.length}`
+        `Current release problems affecting score: ${problemFindings.length}`,
       );
 
       output.push(
-        `Optimization suggestions not affecting score: ${optimizationFindings.length}`
+        `Optimization suggestions not affecting score: ${optimizationFindings.length}`,
       );
 
       output.push(
-        `Informational findings not affecting score: ${informationFindings.length}`
-      );
-
-      output.push("");
-
-      // --------------------------------------------------------
-      // IMPORTANT
-      // --------------------------------------------------------
-
-      output.push(
-        "IMPORTANT"
-      );
-
-      output.push(
-        "---------"
-      );
-
-      output.push(
-        "This inspection focuses on the actual contents and structure of the AAB."
-      );
-
-      output.push(
-        "It does not replace Google Play's own validation."
-      );
-
-      output.push(
-        "A healthy Doctor score does not guarantee Google Play approval."
+        `Informational findings not affecting score: ${informationFindings.length}`,
       );
 
       output.push("");
 
-      // --------------------------------------------------------
-      // NEXT STEP
-      // --------------------------------------------------------
-
       output.push(
-        "NEXT STEP"
+        "IMPORTANT",
       );
 
       output.push(
-        "---------"
+        "---------",
+      );
+
+      output.push(
+        "This inspection focuses on the actual contents and structure of the AAB.",
+      );
+
+      output.push(
+        "It does not replace Google Play's own validation.",
+      );
+
+      output.push(
+        "A healthy Doctor score does not guarantee Google Play approval.",
+      );
+
+      output.push("");
+
+      output.push(
+        "NEXT STEP",
+      );
+
+      output.push(
+        "---------",
       );
 
       if (
@@ -3705,51 +3960,51 @@ NEXT STEP
         0
       ) {
         output.push(
-          "👉 Review the release risks above."
+          "👉 Review the release risks above.",
         );
 
         output.push(
-          "👉 Fix anything relevant to your app."
+          "👉 Fix anything relevant to your app.",
         );
 
         output.push(
-          "👉 Build a fresh AAB and inspect it again."
+          "👉 Build a fresh AAB and inspect it again.",
         );
       } else if (
         optimizationFindings.length >
         0
       ) {
         output.push(
-          "👉 Your AAB passed the release-risk inspection."
+          "👉 Your AAB passed the release-risk inspection.",
         );
 
         output.push(
-          "👉 The optimization suggestions are optional."
+          "👉 The optimization suggestions are optional.",
         );
 
         output.push(
-          "👉 You can continue with your release process."
+          "👉 You can continue with your release process.",
         );
       } else {
         output.push(
-          "👉 Your AAB passed this inspection."
+          "👉 Your AAB passed this inspection.",
         );
 
         output.push(
-          "👉 You can continue with your release process."
+          "👉 You can continue with your release process.",
         );
       }
 
       output.push("");
 
       output.push(
-        "🟢 SMART AAB INSPECTION COMPLETE"
+        "🟢 SMART AAB INSPECTION COMPLETE",
       );
 
       return textResult(
-        output.join(
-          "\n"
-        ).trim()
+        output
+          .join("\n")
+          .trim(),
       );
     } catch (error) {
       return textResult(
@@ -3758,9 +4013,13 @@ NEXT STEP
 
 I found the AAB, but something went wrong while inspecting it.
 
-File:
+${
+  remoteUpload
+    ? "The uploaded remote AAB could not be inspected."
+    : `File:
 
-${aabPath}
+${aabPath}`
+}
 
 Error:
 
@@ -3771,7 +4030,9 @@ ${
 }
 
 WHAT YOU SHOULD DO
+
 ------------------
+
 1. Build a fresh AAB:
 
    flutter build appbundle --release
@@ -3781,20 +4042,18 @@ WHAT YOU SHOULD DO
    build/app/outputs/bundle/release/app-release.aab
 
 3. Run the inspection again.
-        `.trim()
+        `.trim(),
       );
     } finally {
-      if (
-        tempScript
-      ) {
+      if (tempScript) {
         try {
           if (
             fs.existsSync(
-              tempScript
+              tempScript,
             )
           ) {
             fs.unlinkSync(
-              tempScript
+              tempScript,
             );
           }
         } catch {
@@ -3802,8 +4061,23 @@ WHAT YOU SHOULD DO
         }
       }
     }
-  }
+  },
 );
+
+}
+
+export function createServer() {
+  const server = new McpServer({
+    name: "app-release-doctor",
+    version: "1.1.0",
+  });
+
+  registerTools(server);
+
+  return server;
+}
+
+export const server = createServer();
 
 // ============================================================
 // MCP SERVER STARTUP
@@ -3814,7 +4088,7 @@ export async function startStdioServer() {
     new StdioServerTransport();
 
   await server.connect(
-    transport
+    transport,
   );
 }
 
@@ -3825,30 +4099,32 @@ export async function startStdioServer() {
 const currentFile =
   path.resolve(
     new URL(
-      import.meta.url
-    ).pathname
+      import.meta.url,
+    ).pathname,
   );
 
 const executedFile =
   process.argv[1]
     ? path.resolve(
-        process.argv[1]
+        process.argv[1],
       )
     : "";
 
 if (
-  currentFile === executedFile &&
-  process.env.APP_RELEASE_DOCTOR_TRANSPORT !==
+  currentFile ===
+    executedFile &&
+  process.env
+    .APP_RELEASE_DOCTOR_TRANSPORT !==
     "http"
 ) {
   startStdioServer().catch(
     (error) => {
       console.error(
         "Fatal MCP server error:",
-        error
+        error,
       );
 
       process.exit(1);
-    }
+    },
   );
 }

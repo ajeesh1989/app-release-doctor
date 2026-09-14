@@ -1,42 +1,36 @@
 import express from "express";
-
 import multer from "multer";
-
 import fs from "fs";
-
 import path from "path";
-
 import os from "os";
-
 import crypto from "crypto";
-
+import AdmZip from "adm-zip";
 import { fileURLToPath } from "url";
 
-import {
-  inspectAab,
-  checkFlutterProject,
-  buildRelease,
-} from "./doctor.js";
-
-// ==================================================
-// PATH SETUP
-// ==================================================
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 const __filename = fileURLToPath(import.meta.url);
-
 const __dirname = path.dirname(__filename);
-
-// ==================================================
-// APP CONFIG
-// ==================================================
 
 const app = express();
 
 const PORT = 3030;
 
-// ==================================================
-// TEMP DIRECTORIES
-// ==================================================
+// ============================================================
+// REMOTE MCP CONFIGURATION
+// ============================================================
+
+const REMOTE_MCP_URL =
+  process.env.APP_RELEASE_DOCTOR_REMOTE_URL ||
+  "http://127.0.0.1:8787/mcp";
+
+const REMOTE_MCP_TOKEN =
+  process.env.APP_RELEASE_DOCTOR_TOKEN || "";
+
+// ============================================================
+// TEMPORARY DIRECTORIES
+// ============================================================
 
 const uploadDirectory = path.join(
   os.tmpdir(),
@@ -48,6 +42,11 @@ const projectUploadDirectory = path.join(
   "flutter-projects"
 );
 
+const zipDirectory = path.join(
+  uploadDirectory,
+  "remote-zips"
+);
+
 fs.mkdirSync(uploadDirectory, {
   recursive: true,
 });
@@ -56,29 +55,33 @@ fs.mkdirSync(projectUploadDirectory, {
   recursive: true,
 });
 
-// ==================================================
-// MULTER CONFIGURATION
-// ==================================================
+fs.mkdirSync(zipDirectory, {
+  recursive: true,
+});
+
+// ============================================================
+// UPLOAD CONFIGURATION
+// ============================================================
 
 const upload = multer({
   dest: uploadDirectory,
   limits: {
     fileSize: 1024 * 1024 * 1024,
-    files: 5000,
+    files: 1,
   },
 });
 
 const projectUpload = multer({
-  dest: uploadDirectory,
+  dest: projectUploadDirectory,
   limits: {
     fileSize: 20 * 1024 * 1024,
     files: 5000,
   },
 });
 
-// ==================================================
-// MIDDLEWARE
-// ==================================================
+// ============================================================
+// EXPRESS
+// ============================================================
 
 app.use(express.json());
 
@@ -88,20 +91,398 @@ app.use(
   )
 );
 
-// ==================================================
-// HELPERS
-// ==================================================
+// ============================================================
+// REMOTE MCP CLIENT
+// ============================================================
 
-function safeRelativePath(input: string): string {
-  let value = String(input || "");
+let remoteClient: Client | null = null;
 
-  value = value.replace(/\\/g, "/");
+let remoteConnecting: Promise<Client> | null = null;
 
-  // Remove leading slash characters.
-  value = value.replace(/^\/+/, "");
+async function createRemoteClient(): Promise<Client> {
+  const client = new Client(
+    {
+      name: "app-release-doctor-web",
+      version: "2.0.0",
+    },
+    {
+      capabilities: {},
+    }
+  );
 
-  // Remove Windows drive prefixes.
-  value = value.replace(/^[A-Za-z]:\/+/, "");
+  const headers: Record<string, string> = {};
+
+  if (REMOTE_MCP_TOKEN) {
+    headers.Authorization =
+      `Bearer ${REMOTE_MCP_TOKEN}`;
+  }
+
+  const transport =
+    new StreamableHTTPClientTransport(
+      new URL(REMOTE_MCP_URL),
+      {
+        requestInit: {
+          headers,
+        },
+      }
+    );
+
+  // The installed MCP SDK version has a slightly
+  // different Transport typing when
+  // exactOptionalPropertyTypes is enabled.
+  //
+  // The runtime transport is compatible, so use the
+  // same compatibility cast already used by remote-mcp.ts.
+  const compatibleTransport =
+    transport as unknown as Parameters<
+      typeof client.connect
+    >[0];
+
+  await client.connect(
+    compatibleTransport
+  );
+
+  return client;
+}
+
+async function getRemoteClient(): Promise<Client> {
+  if (remoteClient) {
+    return remoteClient;
+  }
+
+  if (remoteConnecting) {
+    return remoteConnecting;
+  }
+
+  remoteConnecting =
+    createRemoteClient()
+      .then((client) => {
+        remoteClient = client;
+        remoteConnecting = null;
+
+        console.log(
+          "🔗 Connected to remote App Release Doctor MCP"
+        );
+
+        console.log(
+          `   ${REMOTE_MCP_URL}`
+        );
+
+        return client;
+      })
+      .catch((error) => {
+        remoteConnecting = null;
+        throw error;
+      });
+
+  return remoteConnecting;
+}
+
+// ============================================================
+// REMOTE MCP TOOL CALL
+// ============================================================
+
+async function callRemoteTool(
+  toolName: string,
+  argumentsObject: Record<string, unknown>
+): Promise<string> {
+  let client = await getRemoteClient();
+
+  try {
+    const result = await client.callTool({
+      name: toolName,
+      arguments: argumentsObject,
+    });
+
+    return extractMcpText(result);
+  } catch (error) {
+    console.error(
+      `Remote MCP tool "${toolName}" failed:`,
+      error
+    );
+
+    remoteClient = null;
+
+    try {
+      await client.close();
+    } catch {
+      // Ignore close errors.
+    }
+
+    client = await getRemoteClient();
+
+    const result = await client.callTool({
+      name: toolName,
+      arguments: argumentsObject,
+    });
+
+    return extractMcpText(result);
+  }
+}
+
+// ============================================================
+// MCP RESULT PARSER
+// ============================================================
+
+function extractMcpText(
+  result: unknown
+): string {
+  if (
+    result &&
+    typeof result === "object"
+  ) {
+    const value =
+      result as {
+        content?: unknown;
+        structuredContent?: unknown;
+        isError?: boolean;
+      };
+
+    if (
+      Array.isArray(value.content)
+    ) {
+      const textParts: string[] = [];
+
+      for (const item of value.content) {
+        if (
+          item &&
+          typeof item === "object"
+        ) {
+          const contentItem =
+            item as {
+              type?: string;
+              text?: string;
+            };
+
+          if (
+            contentItem.type === "text" &&
+            typeof contentItem.text ===
+              "string"
+          ) {
+            textParts.push(
+              contentItem.text
+            );
+          }
+        }
+      }
+
+      if (textParts.length > 0) {
+        return textParts.join("\n");
+      }
+    }
+
+    if (
+      typeof value.structuredContent ===
+      "string"
+    ) {
+      return value.structuredContent;
+    }
+
+    if (
+      value.structuredContent &&
+      typeof value.structuredContent ===
+        "object"
+    ) {
+      return JSON.stringify(
+        value.structuredContent,
+        null,
+        2
+      );
+    }
+  }
+
+  return String(result ?? "");
+}
+
+// ============================================================
+// REMOTE UPLOAD HELPERS
+// ============================================================
+
+async function uploadAabToRemote(
+  filePath: string,
+  originalName: string
+): Promise<{
+  uploadId: string;
+  fileName: string;
+}> {
+  const buffer = fs.readFileSync(
+    filePath
+  );
+
+  const formData = new FormData();
+
+  formData.append(
+    "aab",
+    new Blob(
+      [buffer],
+      {
+        type:
+          "application/octet-stream",
+      }
+    ),
+    originalName
+  );
+
+  const headers: Record<string, string> = {};
+
+  if (REMOTE_MCP_TOKEN) {
+    headers.Authorization =
+      `Bearer ${REMOTE_MCP_TOKEN}`;
+  }
+
+  const response = await fetch(
+    REMOTE_MCP_URL.replace(
+      /\/mcp$/,
+      "/upload/aab"
+    ),
+    {
+      method: "POST",
+      headers,
+      body: formData,
+    }
+  );
+
+  const data =
+    await parseRemoteJson(response);
+
+  if (
+    !response.ok ||
+    !data.success ||
+    typeof data.uploadId !==
+      "string"
+  ) {
+    throw new Error(
+      data.error ||
+        "Remote AAB upload failed."
+    );
+  }
+
+  return {
+    uploadId:
+      data.uploadId,
+    fileName:
+      data.fileName ||
+      originalName,
+  };
+}
+
+async function uploadProjectZipToRemote(
+  zipPath: string,
+  originalName: string
+): Promise<{
+  uploadId: string;
+  fileName: string;
+  fileCount?: number;
+}> {
+  const buffer = fs.readFileSync(
+    zipPath
+  );
+
+  const formData = new FormData();
+
+  formData.append(
+    "project",
+    new Blob(
+      [buffer],
+      {
+        type: "application/zip",
+      }
+    ),
+    originalName
+  );
+
+  const headers: Record<string, string> = {};
+
+  if (REMOTE_MCP_TOKEN) {
+    headers.Authorization =
+      `Bearer ${REMOTE_MCP_TOKEN}`;
+  }
+
+  const response = await fetch(
+    REMOTE_MCP_URL.replace(
+      /\/mcp$/,
+      "/upload/project"
+    ),
+    {
+      method: "POST",
+      headers,
+      body: formData,
+    }
+  );
+
+  const data =
+    await parseRemoteJson(response);
+
+  if (
+    !response.ok ||
+    !data.success ||
+    typeof data.uploadId !==
+      "string"
+  ) {
+    throw new Error(
+      data.error ||
+        "Remote Flutter project upload failed."
+    );
+  }
+
+  return {
+    uploadId:
+      data.uploadId,
+    fileName:
+      data.fileName ||
+      originalName,
+    fileCount:
+      typeof data.fileCount ===
+      "number"
+        ? data.fileCount
+        : undefined,
+  };
+}
+
+async function parseRemoteJson(
+  response: Response
+): Promise<any> {
+  const text =
+    await response.text();
+
+  if (!text) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(
+      `Remote server returned an invalid response (${response.status}).`
+    );
+  }
+}
+
+// ============================================================
+// SAFE PATH HELPERS
+// ============================================================
+
+function safeRelativePath(
+  input: string
+): string {
+  let value = String(
+    input || ""
+  );
+
+  value = value.replace(
+    /\\/g,
+    "/"
+  );
+
+  value = value.replace(
+    /^\/+/,
+    ""
+  );
+
+  value = value.replace(
+    /^[A-Za-z]:\/+/,
+    ""
+  );
 
   const parts = value
     .split("/")
@@ -115,9 +496,13 @@ function safeRelativePath(input: string): string {
   return parts.join("/");
 }
 
-function removeDirectory(directory: string): void {
+function removeDirectory(
+  directory: string
+): void {
   try {
-    if (fs.existsSync(directory)) {
+    if (
+      fs.existsSync(directory)
+    ) {
       fs.rmSync(directory, {
         recursive: true,
         force: true,
@@ -131,9 +516,13 @@ function removeDirectory(directory: string): void {
   }
 }
 
-function removeFile(filePath: string): void {
+function removeFile(
+  filePath: string
+): void {
   try {
-    if (fs.existsSync(filePath)) {
+    if (
+      fs.existsSync(filePath)
+    ) {
       fs.unlinkSync(filePath);
     }
   } catch {
@@ -146,36 +535,151 @@ function isInsideDirectory(
   targetPath: string
 ): boolean {
   const parent =
-    path.resolve(parentDirectory);
+    path.resolve(
+      parentDirectory
+    );
 
   const target =
-    path.resolve(targetPath);
+    path.resolve(
+      targetPath
+    );
 
   return (
     target === parent ||
-    target.startsWith(parent + path.sep)
+    target.startsWith(
+      parent + path.sep
+    )
   );
 }
 
-// ==================================================
-// HEALTH / STATUS
-// ==================================================
+// ============================================================
+// PROJECT ZIP CREATION
+// ============================================================
+
+function createProjectZip(
+  files: Express.Multer.File[],
+  zipPath: string
+): {
+  fileCount: number;
+  projectName: string;
+} {
+  const zip = new AdmZip();
+
+  let fileCount = 0;
+
+  let projectName =
+    "flutter-project";
+
+  for (const file of files) {
+    const relativePath =
+      safeRelativePath(
+        file.originalname
+      );
+
+    if (!relativePath) {
+      continue;
+    }
+
+    const lowerPath =
+      relativePath.toLowerCase();
+
+    const shouldIgnore =
+      lowerPath
+        .split("/")
+        .some((part) =>
+          [
+            ".git",
+            ".dart_tool",
+            ".idea",
+            "build",
+            ".gradle",
+          ].includes(part)
+        );
+
+    if (shouldIgnore) {
+      continue;
+    }
+
+    const parts =
+      relativePath.split("/");
+
+    if (
+      parts.length > 1 &&
+      parts[0]
+    ) {
+      projectName =
+        parts[0] ?? projectName;
+    }
+
+    if (
+      relativePath.toLowerCase() ===
+      "pubspec.yaml"
+    ) {
+      projectName =
+        "flutter-project";
+    }
+
+    if (
+      relativePath
+        .toLowerCase()
+        .endsWith(
+          "/pubspec.yaml"
+        ) &&
+      parts[0]
+    ) {
+      projectName =
+        parts[0] ?? projectName;
+    }
+
+    const data =
+      fs.readFileSync(
+        file.path
+      );
+
+    zip.addFile(
+      relativePath,
+      data
+    );
+
+    fileCount++;
+  }
+
+  if (fileCount === 0) {
+    throw new Error(
+      "No usable Flutter project files were found."
+    );
+  }
+
+  zip.writeZip(zipPath);
+
+  return {
+    fileCount,
+    projectName,
+  };
+}
+
+// ============================================================
+// STATUS
+// ============================================================
 
 app.get(
   "/api/status",
   (_req, res) => {
     res.json({
       ok: true,
-      name: "App Release Doctor",
+      name:
+        "App Release Doctor",
       version: "2.0.0",
       service: "web",
+      backend:
+        "remote-mcp",
     });
   }
 );
 
-// ==================================================
-// AAB INSPECTION
-// ==================================================
+// ============================================================
+// AAB INSPECTOR
+// ============================================================
 
 app.post(
   "/api/inspect-aab",
@@ -190,15 +694,17 @@ app.post(
     }
 
     const originalName =
-      req.file.originalname || "";
-
-    const originalNameLower =
-      originalName.toLowerCase();
+      req.file.originalname ||
+      "app.aab";
 
     if (
-      !originalNameLower.endsWith(".aab")
+      !originalName
+        .toLowerCase()
+        .endsWith(".aab")
     ) {
-      removeFile(req.file.path);
+      removeFile(
+        req.file.path
+      );
 
       return res.status(400).json({
         ok: false,
@@ -207,61 +713,108 @@ app.post(
       });
     }
 
-    const uploadedPath =
-      `${req.file.path}.aab`;
-
     try {
-      fs.renameSync(
-        req.file.path,
-        uploadedPath
-      );
-
       console.log("");
-
       console.log(
         "🩺 SMART AAB INSPECTION"
       );
-
       console.log(
         "-----------------------"
       );
-
       console.log(
         `File: ${originalName}`
       );
-
       console.log(
-        `Temp: ${uploadedPath}`
+        "Backend: Remote MCP"
       );
-
       console.log("");
 
-      const result =
-        await inspectAab(
-          uploadedPath
+      // ------------------------------------------------------
+      // 1. Upload AAB to remote server
+      // ------------------------------------------------------
+
+      const uploaded =
+        await uploadAabToRemote(
+          req.file.path,
+          originalName
         );
 
-      return res.json({
-        ok: result.success,
+      console.log(
+        `Remote uploadId: ${uploaded.uploadId}`
+      );
 
+      // ------------------------------------------------------
+      // 2. Ask remote Doctor to inspect it
+      // ------------------------------------------------------
+
+      const report =
+        await callRemoteTool(
+          "inspect_aab",
+          {
+            uploadId:
+              uploaded.uploadId,
+          }
+        );
+
+      // ------------------------------------------------------
+      // 3. Extract score from report
+      // ------------------------------------------------------
+
+      const scoreMatch =
+        report.match(
+          /RELEASE HEALTH[\s\S]*?(\d{1,3})\/100/i
+        );
+
+      const score =
+        scoreMatch
+          ? Math.min(
+              100,
+              Math.max(
+                0,
+                Number(
+                  scoreMatch[1]
+                )
+              )
+            )
+          : 0;
+
+      const healthMatch =
+        report.match(
+          /RELEASE HEALTH[\s\S]*?\n[^\n]*\s+(HEALTHY|NEEDS REVIEW|ATTENTION NEEDED|SIGNIFICANT ISSUES)\s+\d{1,3}\/100/i
+        );
+
+      let health =
+        healthMatch?.[1] ||
+        "";
+
+      if (!health) {
+        if (score >= 90) {
+          health =
+            "HEALTHY";
+        } else if (score >= 70) {
+          health =
+            "NEEDS REVIEW";
+        } else if (score >= 40) {
+          health =
+            "ATTENTION NEEDED";
+        } else {
+          health =
+            "SIGNIFICANT ISSUES";
+        }
+      }
+
+      return res.json({
+        ok: true,
         fileName:
           originalName,
-
-        success:
-          result.success,
-
-        score:
-          result.score,
-
-        health:
-          result.health,
-
-        report:
-          result.report,
+        success: true,
+        score,
+        health,
+        report,
       });
     } catch (error) {
       console.error(
-        "AAB inspection failed:",
+        "Remote AAB inspection failed:",
         error
       );
 
@@ -273,190 +826,16 @@ app.post(
             : String(error),
       });
     } finally {
-      removeFile(uploadedPath);
-
-      removeFile(req.file.path);
+      removeFile(
+        req.file.path
+      );
     }
   }
 );
 
-// ==================================================
-// FLUTTER PROJECT - LOCAL PATH
-// ==================================================
-
-app.post(
-  "/api/check-project",
-  async (req, res) => {
-    const projectPath =
-      typeof req.body?.projectPath === "string"
-        ? req.body.projectPath.trim()
-        : "";
-
-    if (!projectPath) {
-      return res.status(400).json({
-        ok: false,
-        error:
-          "Project path is required.",
-      });
-    }
-
-    try {
-      console.log("");
-
-      console.log(
-        "🩺 FLUTTER PROJECT CHECK"
-      );
-
-      console.log(
-        "------------------------"
-      );
-
-      console.log(
-        `Project: ${projectPath}`
-      );
-
-      console.log("");
-
-      const report =
-        await checkFlutterProject(
-          projectPath
-        );
-
-      return res.json({
-        ok: true,
-
-        projectPath,
-
-        report,
-      });
-    } catch (error) {
-      console.error(
-        "Project check failed:",
-        error
-      );
-
-      return res.status(500).json({
-        ok: false,
-        error:
-          error instanceof Error
-            ? error.message
-            : String(error),
-      });
-    }
-  }
-);
-
-// ==================================================
-// PLAY STORE READINESS
-// ==================================================
-//
-// This performs the same real Flutter Android
-// project inspection used by the release checks.
-//
-// The frontend sends the local project path.
-// The result is interpreted by app.js as the
-// Play Store readiness report.
-//
-// ==================================================
-
-app.post(
-  "/api/check-play-store-readiness",
-  async (req, res) => {
-    const projectPath =
-      typeof req.body?.projectPath === "string"
-        ? req.body.projectPath.trim()
-        : "";
-
-    if (!projectPath) {
-      return res.status(400).json({
-        ok: false,
-        error:
-          "Project path is required.",
-      });
-    }
-
-    try {
-      if (!fs.existsSync(projectPath)) {
-        return res.status(400).json({
-          ok: false,
-          error:
-            "The specified project path does not exist.",
-        });
-      }
-
-      const stat =
-        fs.statSync(projectPath);
-
-      if (!stat.isDirectory()) {
-        return res.status(400).json({
-          ok: false,
-          error:
-            "The specified project path is not a directory.",
-        });
-      }
-
-      const pubspecPath =
-        path.join(
-          projectPath,
-          "pubspec.yaml"
-        );
-
-      if (!fs.existsSync(pubspecPath)) {
-        return res.status(400).json({
-          ok: false,
-          error:
-            "pubspec.yaml was not found. Please enter the root folder of a Flutter project.",
-        });
-      }
-
-      console.log("");
-
-      console.log(
-        "🩺 PLAY STORE READINESS"
-      );
-
-      console.log(
-        "----------------------"
-      );
-
-      console.log(
-        `Project: ${projectPath}`
-      );
-
-      console.log("");
-
-      const report =
-        await checkFlutterProject(
-          projectPath
-        );
-
-      return res.json({
-        ok: true,
-
-        projectPath,
-
-        report,
-      });
-    } catch (error) {
-      console.error(
-        "Play Store readiness check failed:",
-        error
-      );
-
-      return res.status(500).json({
-        ok: false,
-        error:
-          error instanceof Error
-            ? error.message
-            : String(error),
-      });
-    }
-  }
-);
-
-// ==================================================
-// FLUTTER PROJECT - FOLDER UPLOAD
-// ==================================================
+// ============================================================
+// FLUTTER PROJECT UPLOAD
+// ============================================================
 
 app.post(
   "/api/check-project-upload",
@@ -481,41 +860,34 @@ app.post(
     const projectId =
       `${Date.now()}-${crypto.randomBytes(6).toString("hex")}`;
 
-    const projectRoot =
+    const zipPath =
       path.join(
-        projectUploadDirectory,
-        projectId
+        zipDirectory,
+        `${projectId}.zip`
       );
 
     try {
-      fs.mkdirSync(
-        projectRoot,
-        {
-          recursive: true,
-        }
-      );
-
       console.log("");
-
       console.log(
         "📁 FLUTTER PROJECT UPLOAD"
       );
-
       console.log(
         "-------------------------"
       );
-
       console.log(
-        `Files: ${files.length}`
+        `Browser files: ${files.length}`
       );
-
       console.log(
-        `Temp: ${projectRoot}`
+        "Backend: Remote MCP"
       );
-
       console.log("");
 
-      let pubspecFound = false;
+      // ------------------------------------------------------
+      // Check pubspec before creating ZIP
+      // ------------------------------------------------------
+
+      let pubspecFound =
+        false;
 
       for (const file of files) {
         const relativePath =
@@ -523,80 +895,25 @@ app.post(
             file.originalname
           );
 
-        if (!relativePath) {
-          removeFile(file.path);
-          continue;
-        }
-
-        const destination =
-          path.resolve(
-            projectRoot,
-            relativePath
-          );
-
-        // Security check against path traversal.
         if (
-          !isInsideDirectory(
-            projectRoot,
-            destination
-          )
-        ) {
-          console.warn(
-            `Skipped unsafe uploaded path: ${file.originalname}`
-          );
-
-          removeFile(file.path);
-
-          continue;
-        }
-
-        // Ignore common generated/cache directories.
-        const pathParts =
           relativePath
-            .split("/")
-            .map((part) =>
-              part.toLowerCase()
-            );
-
-        const ignoredDirectories = [
-          ".git",
-          ".dart_tool",
-          ".idea",
-          "build",
-          ".gradle",
-        ];
-
-        const shouldIgnore =
-          pathParts.some(
-            (part) =>
-              ignoredDirectories.includes(
-                part
-              )
-          );
-
-        if (shouldIgnore) {
-          removeFile(file.path);
-          continue;
-        }
-
-        if (
-          relativePath.toLowerCase() ===
+            .toLowerCase() ===
           "pubspec.yaml"
         ) {
           pubspecFound = true;
+          break;
         }
 
-        fs.mkdirSync(
-          path.dirname(destination),
-          {
-            recursive: true,
-          }
-        );
-
-        fs.renameSync(
-          file.path,
-          destination
-        );
+        if (
+          relativePath
+            .toLowerCase()
+            .endsWith(
+              "/pubspec.yaml"
+            )
+        ) {
+          pubspecFound = true;
+          break;
+        }
       }
 
       if (!pubspecFound) {
@@ -607,32 +924,74 @@ app.post(
         });
       }
 
+      // ------------------------------------------------------
+      // Create ZIP locally
+      // ------------------------------------------------------
+
+      const zipInfo =
+        createProjectZip(
+          files,
+          zipPath
+        );
+
       console.log(
-        `Inspecting uploaded project: ${projectRoot}`
+        `Created ZIP: ${zipPath}`
       );
 
+      console.log(
+        `ZIP files: ${zipInfo.fileCount}`
+      );
+
+      const zipStats =
+        fs.statSync(
+          zipPath
+        );
+
+      console.log(
+        `ZIP size: ${zipStats.size} bytes`
+      );
+
+      // ------------------------------------------------------
+      // Upload ZIP to remote Doctor
+      // ------------------------------------------------------
+
+      const uploaded =
+        await uploadProjectZipToRemote(
+          zipPath,
+          `${zipInfo.projectName}.zip`
+        );
+
+      console.log(
+        `Remote uploadId: ${uploaded.uploadId}`
+      );
+
+      // ------------------------------------------------------
+      // Run remote Flutter project check
+      // ------------------------------------------------------
+
       const report =
-        await checkFlutterProject(
-          projectRoot
+        await callRemoteTool(
+          "check_flutter_project",
+          {
+            uploadId:
+              uploaded.uploadId,
+          }
         );
 
       return res.json({
         ok: true,
-
         projectPath:
-          projectRoot,
-
+          `remote:${uploaded.uploadId}`,
         projectName:
-          path.basename(projectRoot),
-
+          zipInfo.projectName,
         fileCount:
-          files.length,
-
+          uploaded.fileCount ||
+          zipInfo.fileCount,
         report,
       });
     } catch (error) {
       console.error(
-        "Uploaded project check failed:",
+        "Remote Flutter project check failed:",
         error
       );
 
@@ -644,29 +1003,255 @@ app.post(
             : String(error),
       });
     } finally {
-      // Always remove the uploaded project.
-      removeDirectory(
-        projectRoot
+      removeFile(
+        zipPath
       );
 
-      // Clean up any multer files that
-      // were not moved into the project.
       for (const file of files) {
-        removeFile(file.path);
+        removeFile(
+          file.path
+        );
       }
     }
   }
 );
 
-// ==================================================
-// RELEASE BUILD
-// ==================================================
+// ============================================================
+// LOCAL FLUTTER PROJECT CHECK
+// ============================================================
+
+app.post(
+  "/api/check-project",
+  async (req, res) => {
+    const projectPath =
+      typeof req.body?.projectPath ===
+      "string"
+        ? req.body.projectPath.trim()
+        : "";
+
+    if (!projectPath) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Project path is required.",
+      });
+    }
+
+    try {
+      if (
+        !fs.existsSync(
+          projectPath
+        )
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "The specified project path does not exist.",
+        });
+      }
+
+      const stat =
+        fs.statSync(
+          projectPath
+        );
+
+      if (!stat.isDirectory()) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "The specified project path is not a directory.",
+        });
+      }
+
+      const pubspecPath =
+        path.join(
+          projectPath,
+          "pubspec.yaml"
+        );
+
+      if (
+        !fs.existsSync(
+          pubspecPath
+        )
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "pubspec.yaml was not found. Please enter the root folder of a Flutter project.",
+        });
+      }
+
+      console.log("");
+      console.log(
+        "🩺 FLUTTER PROJECT CHECK"
+      );
+      console.log(
+        "------------------------"
+      );
+      console.log(
+        `Project: ${projectPath}`
+      );
+      console.log(
+        "Backend: Local"
+      );
+      console.log("");
+
+      const {
+        checkFlutterProject,
+      } = await import(
+        "./doctor.js"
+      );
+
+      const report =
+        await checkFlutterProject(
+          projectPath
+        );
+
+      return res.json({
+        ok: true,
+        projectPath,
+        report,
+      });
+    } catch (error) {
+      console.error(
+        "Local project check failed:",
+        error
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : String(error),
+      });
+    }
+  }
+);
+
+// ============================================================
+// PLAY STORE READINESS
+// ============================================================
+
+app.post(
+  "/api/check-play-store-readiness",
+  async (req, res) => {
+    const projectPath =
+      typeof req.body?.projectPath ===
+      "string"
+        ? req.body.projectPath.trim()
+        : "";
+
+    if (!projectPath) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Project path is required.",
+      });
+    }
+
+    try {
+      if (
+        !fs.existsSync(
+          projectPath
+        )
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "The specified project path does not exist.",
+        });
+      }
+
+      const stat =
+        fs.statSync(
+          projectPath
+        );
+
+      if (!stat.isDirectory()) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "The specified project path is not a directory.",
+        });
+      }
+
+      const pubspecPath =
+        path.join(
+          projectPath,
+          "pubspec.yaml"
+        );
+
+      if (
+        !fs.existsSync(
+          pubspecPath
+        )
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "pubspec.yaml was not found. Please enter the root folder of a Flutter project.",
+        });
+      }
+
+      console.log("");
+      console.log(
+        "🩺 PLAY STORE READINESS"
+      );
+      console.log(
+        "----------------------"
+      );
+      console.log(
+        `Project: ${projectPath}`
+      );
+      console.log(
+        "Backend: Local"
+      );
+      console.log("");
+
+      const {
+        checkFlutterProject,
+      } = await import(
+        "./doctor.js"
+      );
+
+      const report =
+        await checkFlutterProject(
+          projectPath
+        );
+
+      return res.json({
+        ok: true,
+        projectPath,
+        report,
+      });
+    } catch (error) {
+      console.error(
+        "Play Store readiness check failed:",
+        error
+      );
+
+      return res.status(500).json({
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : String(error),
+      });
+    }
+  }
+);
+
+// ============================================================
+// BUILD RELEASE
+// ============================================================
 
 app.post(
   "/api/build-release",
   async (req, res) => {
     const projectPath =
-      typeof req.body?.projectPath === "string"
+      typeof req.body?.projectPath ===
+      "string"
         ? req.body.projectPath.trim()
         : "";
 
@@ -680,20 +1265,22 @@ app.post(
 
     try {
       console.log("");
-
       console.log(
         "🔨 RELEASE BUILD"
       );
-
       console.log(
         "----------------"
       );
-
       console.log(
         `Project: ${projectPath}`
       );
-
       console.log("");
+
+      const {
+        buildRelease,
+      } = await import(
+        "./doctor.js"
+      );
 
       const report =
         await buildRelease(
@@ -702,9 +1289,7 @@ app.post(
 
       return res.json({
         ok: true,
-
         projectPath,
-
         report,
       });
     } catch (error) {
@@ -724,9 +1309,9 @@ app.post(
   }
 );
 
-// ==================================================
-// FALLBACK
-// ==================================================
+// ============================================================
+// API 404
+// ============================================================
 
 app.use(
   "/api",
@@ -739,28 +1324,87 @@ app.use(
   }
 );
 
-// ==================================================
-// START SERVER
-// ==================================================
+// ============================================================
+// START WEB SERVER
+// ============================================================
 
-app.listen(
-  PORT,
-  "127.0.0.1",
-  () => {
-    console.log("");
+async function startWebServer() {
+  console.log("");
+
+  console.log(
+    "🔗 Connecting Web UI to Remote MCP..."
+  );
+
+  console.log(
+    `Remote MCP: ${REMOTE_MCP_URL}`
+  );
+
+  try {
+    await getRemoteClient();
 
     console.log(
-      "🩺 APP RELEASE DOCTOR"
+      "✅ Remote MCP connection ready."
+    );
+  } catch (error) {
+    console.error("");
+
+    console.error(
+      "⚠️ Remote MCP connection failed."
     );
 
-    console.log(
-      "====================="
+    console.error(
+      error instanceof Error
+        ? error.message
+        : String(error)
     );
 
-    console.log(
-      `Web UI: http://127.0.0.1:${PORT}`
+    console.error("");
+
+    console.error(
+      "The Web UI will still start."
     );
 
-    console.log("");
+    console.error(
+      "Remote AAB/project operations will retry when used."
+    );
+
+    console.error("");
+  }
+
+  app.listen(
+    PORT,
+    "127.0.0.1",
+    () => {
+      console.log("");
+
+      console.log(
+        "🩺 APP RELEASE DOCTOR"
+      );
+
+      console.log(
+        "====================="
+      );
+
+      console.log(
+        `Web UI: http://127.0.0.1:${PORT}`
+      );
+
+      console.log(
+        `Remote MCP: ${REMOTE_MCP_URL}`
+      );
+
+      console.log("");
+    }
+  );
+}
+
+startWebServer().catch(
+  (error) => {
+    console.error(
+      "Fatal Web UI error:",
+      error
+    );
+
+    process.exit(1);
   }
 );

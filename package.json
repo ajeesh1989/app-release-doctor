@@ -5,13 +5,13 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-  "build": "tsc",
-  "mcp": "node dist/index.js",
-  "remote-mcp": "node dist/remote-mcp.js",
-  "web": "node dist/web.js",
-  "start": "node dist/web.js",
-  "inspect": "npx @modelcontextprotocol/inspector node dist/index.js"
-},
+    "build": "tsc",
+    "mcp": "node dist/index.js",
+    "remote-mcp": "node dist/remote-mcp.js",
+    "web": "node dist/web.js",
+    "start": "node dist/web.js",
+    "inspect": "npx @modelcontextprotocol/inspector node dist/index.js"
+  },
   "keywords": [
     "flutter",
     "android",
@@ -25,11 +25,13 @@
   "dependencies": {
     "@modelcontextprotocol/inspector": "^2.5.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "adm-zip": "^0.6.1",
     "express": "^5.2.1",
     "multer": "^2.3.0",
     "zod": "^4.5.4"
   },
   "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
     "@types/express": "^5.0.6",
     "@types/multer": "^2.2.0",
     "@types/node": "^26.5.0",
