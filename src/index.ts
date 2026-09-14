@@ -1,6 +1,8 @@
 import { exec } from "child_process";
 import { promisify } from "util";
+import crypto from "crypto";
 import fs from "fs";
+import AdmZip from "adm-zip";
 import path from "path";
 
 import {
@@ -137,9 +139,6 @@ function extractString(
 function detectReleaseSigning(
   gradleText: string,
 ): boolean {
-  const text =
-    gradleText.toLowerCase();
-
   // Kotlin DSL / Groovy release signing configuration
   const hasReleaseSigningConfig =
     /signingconfigs?\s*\{[\s\S]*?(create\s*\(\s*["']release["']|release\s*\{)/i.test(
@@ -1898,8 +1897,6 @@ server.tool(
     aabPath,
     uploadId,
   }) => {
-    let tempScript:
-      string | null = null;
 
     let normalizedAabPath =
       "";
@@ -2047,120 +2044,27 @@ The selected input is not a file.
       }
 
       // --------------------------------------------------------
-      // CREATE TEMP POWERSHELL SCRIPT
+      // CROSS-PLATFORM AAB ZIP INSPECTION
+      // --------------------------------------------------------
+      //
+      // Android App Bundles are ZIP archives. Use AdmZip instead
+      // of PowerShell so inspection works on Windows, Linux,
+      // macOS, and Render.
+      //
       // --------------------------------------------------------
 
-      tempScript =
-        path.join(
-          projectTempDirectory(),
-          `smart-aab-${Date.now()}.ps1`,
-        );
-
-      const escapedPath =
-        normalizedAabPath.replace(
-          /'/g,
-          "''",
-        );
-
-      const script = `
-$ErrorActionPreference = "Stop"
-
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-Add-Type -AssemblyName System.Security
-
-$path = '${escapedPath}'
-
-$zip = $null
-
-try {
-
-    $zip = [System.IO.Compression.ZipFile]::OpenRead($path)
-
-    foreach ($entry in $zip.Entries) {
-
-        $sha = ""
-
-        if ($entry.Length -gt 0) {
-
-            $stream = $null
-            $sha256 = $null
-
-            try {
-
-                $stream = $entry.Open()
-
-                $sha256 =
-                    [System.Security.Cryptography.SHA256]::Create()
-
-                $hash =
-                    $sha256.ComputeHash($stream)
-
-                $sha =
-                    ([System.BitConverter]::ToString($hash)).Replace("-", "").ToLowerInvariant()
-
-            }
-            finally {
-
-                if ($null -ne $stream) {
-                    $stream.Dispose()
-                }
-
-                if ($null -ne $sha256) {
-                    $sha256.Dispose()
-                }
-            }
-        }
-
-        $safeName = $entry.FullName
-
-        Write-Output "$safeName|$($entry.Length)|$sha"
-    }
-}
-finally {
-
-    if ($null -ne $zip) {
-        $zip.Dispose()
-    }
-}
-`;
-
-      fs.writeFileSync(
-        tempScript,
-        script,
-        "utf8",
-      );
-
-      // --------------------------------------------------------
-      // RUN POWERSHELL
-      // --------------------------------------------------------
-
-      let stdout = "";
+      let zip: AdmZip;
 
       try {
-        const result =
-          await execAsync(
-            `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${tempScript}"`,
-            {
-              maxBuffer:
-                100 * 1024 * 1024,
-            },
-          );
-
-        stdout =
-          result.stdout;
+        zip = new AdmZip(
+          normalizedAabPath,
+        );
       } catch (error) {
-        const execError =
-          error as {
-            stdout?: string;
-            stderr?: string;
-            message?: string;
-          };
-
         return textResult(
           `
 🔴 I COULDN'T INSPECT THE AAB
 
-The AAB exists, but Windows could not read its contents.
+The AAB exists, but it could not be opened as a valid ZIP archive.
 
 AAB:
 
@@ -2171,27 +2075,23 @@ ${
 }
 
 ERROR
-
 -----
 
 ${
-  execError.stderr ||
-  execError.message ||
-  String(error)
+  error instanceof Error
+    ? error.message
+    : String(error)
 }
 
 WHAT YOU SHOULD DO
 
 ------------------
 
-1. Make sure the AAB is not locked.
-
+1. Make sure the AAB is a valid Android App Bundle.
 2. Build a fresh release bundle.
-
 3. Try the inspection again.
 
 COMMAND
-
 -------
 
 flutter build appbundle --release
@@ -2199,27 +2099,15 @@ flutter build appbundle --release
         );
       }
 
-      // --------------------------------------------------------
-      // PARSE ZIP ENTRIES
-      // --------------------------------------------------------
+      const zipEntries =
+        zip.getEntries();
 
-      const lines =
-        stdout
-          .split(/\r?\n/)
-          .map(
-            (line) =>
-              line.trim(),
-          )
-          .filter(Boolean);
-
-      if (
-        lines.length === 0
-      ) {
+      if (zipEntries.length === 0) {
         return textResult(
           `
 🔴 I COULDN'T INSPECT THE AAB
 
-The file exists, but no bundle entries were returned.
+The file exists, but no bundle entries were found.
 
 AAB:
 
@@ -2230,7 +2118,93 @@ ${
 }
 
 NEXT STEP
+---------
 
+👉 Build a fresh AAB and try again.
+          `.trim(),
+        );
+      }
+
+      // --------------------------------------------------------
+      // PARSE ZIP ENTRIES
+      // --------------------------------------------------------
+
+      const lines: string[] = [];
+
+      try {
+        for (const entry of zipEntries) {
+          if (entry.isDirectory) {
+            continue;
+          }
+
+          const data = entry.getData();
+
+          const sha256 =
+            crypto
+              .createHash("sha256")
+              .update(data)
+              .digest("hex");
+
+          lines.push(
+            `${entry.entryName}|${data.length}|${sha256}`,
+          );
+        }
+      } catch (error) {
+        return textResult(
+          `
+🔴 I COULDN'T INSPECT THE AAB
+
+The AAB was opened, but one or more bundle entries could not be read.
+
+AAB:
+
+${
+  remoteUpload
+    ? "Uploaded remote AAB"
+    : normalizedAabPath
+}
+
+ERROR
+-----
+
+${
+  error instanceof Error
+    ? error.message
+    : String(error)
+}
+
+WHAT YOU SHOULD DO
+
+------------------
+
+1. Make sure the AAB is not corrupted.
+2. Build a fresh release bundle.
+3. Try the inspection again.
+
+COMMAND
+-------
+
+flutter build appbundle --release
+          `.trim(),
+        );
+      }
+
+      if (lines.length === 0) {
+        return textResult(
+          `
+🔴 I COULDN'T INSPECT THE AAB
+
+The file exists, but no readable bundle entries were returned.
+
+AAB:
+
+${
+  remoteUpload
+    ? "Uploaded remote AAB"
+    : normalizedAabPath
+}
+
+NEXT STEP
 ---------
 
 👉 Build a fresh AAB and try again.
@@ -4044,22 +4018,6 @@ WHAT YOU SHOULD DO
 3. Run the inspection again.
         `.trim(),
       );
-    } finally {
-      if (tempScript) {
-        try {
-          if (
-            fs.existsSync(
-              tempScript,
-            )
-          ) {
-            fs.unlinkSync(
-              tempScript,
-            );
-          }
-        } catch {
-          // Ignore cleanup errors.
-        }
-      }
     }
   },
 );
