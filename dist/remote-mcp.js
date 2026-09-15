@@ -5,7 +5,7 @@ import fs from "fs/promises";
 import path from "path";
 import AdmZip from "adm-zip";
 import { StreamableHTTPServerTransport, } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { server } from "./index.js";
+import { createServer } from "./index.js";
 import { createAabWorkspace, createProjectWorkspace, resolveProjectFilePath, cleanupExpiredRemoteWorkspaces, removeRemoteWorkspace, } from "./remote-workspace.js";
 const app = express();
 const PORT = Number(process.env.PORT) || 8787;
@@ -411,13 +411,21 @@ app.all(MCP_PATH, async (req, res) => {
         }
         const transport = new StreamableHTTPServerTransport({
             sessionIdGenerator: () => {
-                const id = crypto.randomUUID();
-                return id;
+                return crypto.randomUUID();
             },
         });
+        // IMPORTANT:
+        // Create a completely new MCP server instance
+        // for every Streamable HTTP session.
+        //
+        // The exported singleton server from index.ts is
+        // intentionally NOT used here because a single
+        // McpServer instance cannot connect to multiple
+        // transports.
+        const sessionServer = createServer();
         const compatibleTransport = transport;
         try {
-            await server.connect(compatibleTransport);
+            await sessionServer.connect(compatibleTransport);
         }
         catch (error) {
             console.error("MCP server connection failed:", error);
@@ -431,16 +439,24 @@ app.all(MCP_PATH, async (req, res) => {
             return;
         }
         let createdSessionId;
-        transport.onclose = () => {
-            if (createdSessionId) {
-                sessions.delete(createdSessionId);
-            }
-        };
+        transport.onclose =
+            async () => {
+                if (createdSessionId) {
+                    sessions.delete(createdSessionId);
+                }
+                try {
+                    await sessionServer.close();
+                }
+                catch {
+                    // Already closed.
+                }
+            };
         await transport.handleRequest(req, res, req.body);
         createdSessionId =
             transport.sessionId;
         if (createdSessionId) {
             sessions.set(createdSessionId, {
+                server: sessionServer,
                 transport,
                 initialized: true,
             });

@@ -1,3 +1,4 @@
+
 import express from "express";
 import crypto from "crypto";
 import multer from "multer";
@@ -9,7 +10,7 @@ import {
   StreamableHTTPServerTransport,
 } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
-import { server } from "./index.js";
+import { createServer } from "./index.js";
 
 import {
   createAabWorkspace,
@@ -308,6 +309,7 @@ app.post(
 
       // IMPORTANT:
       // Preserve the original uploaded filename.
+
       const {
         workspace,
         aabPath,
@@ -706,8 +708,13 @@ app.use(
 // ============================================================
 
 type McpSession = {
+  server: ReturnType<
+    typeof createServer
+  >;
+
   transport:
     StreamableHTTPServerTransport;
+
   initialized: boolean;
 };
 
@@ -763,25 +770,32 @@ app.all(
       }
 
       const transport =
-        new StreamableHTTPServerTransport(
-          {
-            sessionIdGenerator:
-              () => {
-                const id =
-                  crypto.randomUUID();
+        new StreamableHTTPServerTransport({
+          sessionIdGenerator:
+            () => {
+              return crypto.randomUUID();
+            },
+        });
 
-                return id;
-              },
-          },
-        );
+      // IMPORTANT:
+      // Create a completely new MCP server instance
+      // for every Streamable HTTP session.
+      //
+      // The exported singleton server from index.ts is
+      // intentionally NOT used here because a single
+      // McpServer instance cannot connect to multiple
+      // transports.
+
+      const sessionServer =
+        createServer();
 
       const compatibleTransport =
         transport as unknown as Parameters<
-          typeof server.connect
+          typeof sessionServer.connect
         >[0];
 
       try {
-        await server.connect(
+        await sessionServer.connect(
           compatibleTransport,
         );
       } catch (error) {
@@ -806,13 +820,20 @@ app.all(
         | string
         | undefined;
 
-      transport.onclose = () => {
-        if (createdSessionId) {
-          sessions.delete(
-            createdSessionId,
-          );
-        }
-      };
+      transport.onclose =
+        async () => {
+          if (createdSessionId) {
+            sessions.delete(
+              createdSessionId,
+            );
+          }
+
+          try {
+            await sessionServer.close();
+          } catch {
+            // Already closed.
+          }
+        };
 
       await transport.handleRequest(
         req,
@@ -827,6 +848,7 @@ app.all(
         sessions.set(
           createdSessionId,
           {
+            server: sessionServer,
             transport,
             initialized: true,
           },
