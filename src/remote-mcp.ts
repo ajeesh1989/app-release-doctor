@@ -1,9 +1,9 @@
-
 import express from "express";
 import crypto from "crypto";
 import multer from "multer";
 import fs from "fs/promises";
 import path from "path";
+import os from "os";
 import AdmZip from "adm-zip";
 
 import {
@@ -43,7 +43,8 @@ const MAX_PROJECT_ZIP_SIZE =
 const MAX_PROJECT_FILE_SIZE =
   20 * 1024 * 1024;
 
-const MAX_PROJECT_FILES = 5000;
+const MAX_PROJECT_FILES =
+  5000;
 
 const MAX_PROJECT_TOTAL_SIZE =
   1024 * 1024 * 1024;
@@ -52,6 +53,23 @@ const MAX_PROJECT_TOTAL_SIZE =
 // TEMPORARY UPLOAD CONFIGURATION
 // ============================================================
 
+// Flutter project ZIP files are written to disk instead of RAM.
+// This is important for large project ZIP files.
+const PROJECT_UPLOAD_DIRECTORY =
+  path.join(
+    os.tmpdir(),
+    "app-release-doctor-uploads",
+  );
+
+await fs.mkdir(
+  PROJECT_UPLOAD_DIRECTORY,
+  {
+    recursive: true,
+  },
+);
+
+// AAB uploads remain memory-based because the existing
+// AAB inspection flow is already working.
 const aabUpload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -60,8 +78,37 @@ const aabUpload = multer({
   },
 });
 
+// Flutter project ZIP uploads use disk storage.
 const projectUpload = multer({
-  storage: multer.memoryStorage(),
+  storage: multer.diskStorage({
+    destination: (
+      _req,
+      _file,
+      cb,
+    ) => {
+      cb(
+        null,
+        PROJECT_UPLOAD_DIRECTORY,
+      );
+    },
+
+    filename: (
+      _req,
+      file,
+      cb,
+    ) => {
+      const extension =
+        path.extname(
+          file.originalname || "",
+        );
+
+      cb(
+        null,
+        `${crypto.randomUUID()}${extension}`,
+      );
+    },
+  }),
+
   limits: {
     fileSize: MAX_PROJECT_ZIP_SIZE,
     files: 1,
@@ -83,7 +130,8 @@ app.use(
 // ============================================================
 
 app.use((req, res, next) => {
-  const origin = req.headers.origin;
+  const origin =
+    req.headers.origin;
 
   const allowedOrigins = [
     "https://chatgpt.com",
@@ -101,7 +149,8 @@ app.use((req, res, next) => {
     !allowedOrigins.includes(origin)
   ) {
     return res.status(403).json({
-      error: "Origin is not allowed.",
+      error:
+        "Origin is not allowed.",
     });
   }
 
@@ -127,7 +176,9 @@ app.use((req, res, next) => {
   const expected =
     `Bearer ${MCP_TOKEN}`;
 
-  if (authorization !== expected) {
+  if (
+    authorization !== expected
+  ) {
     return res.status(401).json({
       error: "Unauthorized.",
     });
@@ -140,14 +191,19 @@ app.use((req, res, next) => {
 // HEALTH CHECK
 // ============================================================
 
-app.get("/health", (_req, res) => {
-  res.json({
-    ok: true,
-    service: "app-release-doctor",
-    transport: "streamable-http",
-    endpoint: MCP_PATH,
-  });
-});
+app.get(
+  "/health",
+  (_req, res) => {
+    res.json({
+      ok: true,
+      service:
+        "app-release-doctor",
+      transport:
+        "streamable-http",
+      endpoint: MCP_PATH,
+    });
+  },
+);
 
 // ============================================================
 // ZIP PATH HELPERS
@@ -175,7 +231,8 @@ function isSafeZipPath(
     return false;
   }
 
-  const parts = filePath.split("/");
+  const parts =
+    filePath.split("/");
 
   if (
     parts.some(
@@ -191,7 +248,8 @@ function isSafeZipPath(
 function shouldIgnoreZipPath(
   filePath: string,
 ): boolean {
-  const parts = filePath.split("/");
+  const parts =
+    filePath.split("/");
 
   return parts.some(
     (part) =>
@@ -263,7 +321,9 @@ function findFlutterProjectRoot(
   }
 
   const sorted =
-    Array.from(candidates).sort(
+    Array.from(
+      candidates,
+    ).sort(
       (a, b) =>
         a.length - b.length,
     );
@@ -309,13 +369,13 @@ app.post(
 
       // IMPORTANT:
       // Preserve the original uploaded filename.
-
       const {
         workspace,
         aabPath,
-      } = await createAabWorkspace(
-        originalName,
-      );
+      } =
+        await createAabWorkspace(
+          originalName,
+        );
 
       workspaceDirectory =
         workspace.directory;
@@ -328,12 +388,16 @@ app.post(
       return res.json({
         success: true,
         type: "aab",
-        uploadId: workspace.id,
-        fileName: originalName,
-        size: req.file.size,
-        expiresAt: new Date(
-          workspace.expiresAt,
-        ).toISOString(),
+        uploadId:
+          workspace.id,
+        fileName:
+          originalName,
+        size:
+          req.file.size,
+        expiresAt:
+          new Date(
+            workspace.expiresAt,
+          ).toISOString(),
       });
     } catch (error) {
       if (workspaceDirectory) {
@@ -370,6 +434,10 @@ app.post(
       | string
       | undefined;
 
+    let uploadedZipPath:
+      | string
+      | undefined;
+
     try {
       if (!req.file) {
         return res.status(400).json({
@@ -378,6 +446,9 @@ app.post(
             "No Flutter project ZIP was uploaded.",
         });
       }
+
+      uploadedZipPath =
+        req.file.path;
 
       const originalName =
         req.file.originalname || "";
@@ -394,11 +465,14 @@ app.post(
         });
       }
 
+      // IMPORTANT:
+      // The ZIP is now read from disk instead of
+      // being stored in RAM by multer.
       let zip: AdmZip;
 
       try {
         zip = new AdmZip(
-          req.file.buffer,
+          uploadedZipPath,
         );
       } catch {
         return res.status(400).json({
@@ -623,17 +697,23 @@ app.post(
 
       return res.json({
         success: true,
-        type: "flutter-project",
-        uploadId: workspace.id,
-        fileName: originalName,
-        size: req.file.size,
-        fileCount: extractedFiles,
+        type:
+          "flutter-project",
+        uploadId:
+          workspace.id,
+        fileName:
+          originalName,
+        size:
+          req.file.size,
+        fileCount:
+          extractedFiles,
         extractedBytes,
         projectRoot:
           projectRoot || null,
-        expiresAt: new Date(
-          workspace.expiresAt,
-        ).toISOString(),
+        expiresAt:
+          new Date(
+            workspace.expiresAt,
+          ).toISOString(),
       });
     } catch (error) {
       if (workspaceDirectory) {
@@ -654,6 +734,13 @@ app.post(
             ? error.message
             : String(error),
       });
+    } finally {
+      // Always delete the temporary uploaded ZIP.
+      if (uploadedZipPath) {
+        await fs
+          .unlink(uploadedZipPath)
+          .catch(() => {});
+      }
     }
   },
 );
@@ -695,7 +782,8 @@ app.use(
       authorization !== expected
     ) {
       return res.status(401).json({
-        error: "Unauthorized.",
+        error:
+          "Unauthorized.",
       });
     }
 
@@ -740,7 +828,9 @@ app.all(
 
       if (sessionId) {
         const session =
-          sessions.get(sessionId);
+          sessions.get(
+            sessionId,
+          );
 
         if (!session) {
           return res.status(404).json({
@@ -848,9 +938,11 @@ app.all(
         sessions.set(
           createdSessionId,
           {
-            server: sessionServer,
+            server:
+              sessionServer,
             transport,
-            initialized: true,
+            initialized:
+              true,
           },
         );
       }

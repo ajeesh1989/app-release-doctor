@@ -3,6 +3,7 @@ import crypto from "crypto";
 import multer from "multer";
 import fs from "fs/promises";
 import path from "path";
+import os from "os";
 import AdmZip from "adm-zip";
 import { StreamableHTTPServerTransport, } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer } from "./index.js";
@@ -22,6 +23,14 @@ const MAX_PROJECT_TOTAL_SIZE = 1024 * 1024 * 1024;
 // ============================================================
 // TEMPORARY UPLOAD CONFIGURATION
 // ============================================================
+// Flutter project ZIP files are written to disk instead of RAM.
+// This is important for large project ZIP files.
+const PROJECT_UPLOAD_DIRECTORY = path.join(os.tmpdir(), "app-release-doctor-uploads");
+await fs.mkdir(PROJECT_UPLOAD_DIRECTORY, {
+    recursive: true,
+});
+// AAB uploads remain memory-based because the existing
+// AAB inspection flow is already working.
 const aabUpload = multer({
     storage: multer.memoryStorage(),
     limits: {
@@ -29,8 +38,17 @@ const aabUpload = multer({
         files: 1,
     },
 });
+// Flutter project ZIP uploads use disk storage.
 const projectUpload = multer({
-    storage: multer.memoryStorage(),
+    storage: multer.diskStorage({
+        destination: (_req, _file, cb) => {
+            cb(null, PROJECT_UPLOAD_DIRECTORY);
+        },
+        filename: (_req, file, cb) => {
+            const extension = path.extname(file.originalname || "");
+            cb(null, `${crypto.randomUUID()}${extension}`);
+        },
+    }),
     limits: {
         fileSize: MAX_PROJECT_ZIP_SIZE,
         files: 1,
@@ -210,6 +228,7 @@ app.post("/upload/aab", aabUpload.single("aab"), async (req, res) => {
 // ============================================================
 app.post("/upload/project", projectUpload.single("project"), async (req, res) => {
     let workspaceDirectory;
+    let uploadedZipPath;
     try {
         if (!req.file) {
             return res.status(400).json({
@@ -217,6 +236,8 @@ app.post("/upload/project", projectUpload.single("project"), async (req, res) =>
                 error: "No Flutter project ZIP was uploaded.",
             });
         }
+        uploadedZipPath =
+            req.file.path;
         const originalName = req.file.originalname || "";
         if (!originalName
             .toLowerCase()
@@ -226,9 +247,12 @@ app.post("/upload/project", projectUpload.single("project"), async (req, res) =>
                 error: "Flutter project upload must be a ZIP file.",
             });
         }
+        // IMPORTANT:
+        // The ZIP is now read from disk instead of
+        // being stored in RAM by multer.
         let zip;
         try {
-            zip = new AdmZip(req.file.buffer);
+            zip = new AdmZip(uploadedZipPath);
         }
         catch {
             return res.status(400).json({
@@ -353,6 +377,14 @@ app.post("/upload/project", projectUpload.single("project"), async (req, res) =>
                 ? error.message
                 : String(error),
         });
+    }
+    finally {
+        // Always delete the temporary uploaded ZIP.
+        if (uploadedZipPath) {
+            await fs
+                .unlink(uploadedZipPath)
+                .catch(() => { });
+        }
     }
 });
 // ============================================================
