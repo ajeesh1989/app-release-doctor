@@ -4,7 +4,8 @@ import multer from "multer";
 import fs from "fs/promises";
 import path from "path";
 import os from "os";
-import AdmZip from "adm-zip";
+import { pipeline } from "stream/promises";
+import unzipper from "unzipper";
 import { StreamableHTTPServerTransport, } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer } from "./index.js";
 import { createAabWorkspace, createProjectWorkspace, resolveProjectFilePath, cleanupExpiredRemoteWorkspaces, removeRemoteWorkspace, } from "./remote-workspace.js";
@@ -143,16 +144,13 @@ function shouldIgnoreZipPath(filePath) {
         part === "build" ||
         part === ".gradle");
 }
-// ============================================================
-// FIND FLUTTER PROJECT ROOT INSIDE ZIP
-// ============================================================
 function findFlutterProjectRoot(entries) {
     const candidates = new Set();
     for (const entry of entries) {
-        if (entry.isDirectory) {
+        if (entry.type === "Directory") {
             continue;
         }
-        const normalized = normalizeZipPath(entry.entryName);
+        const normalized = normalizeZipPath(entry.path);
         if (!isSafeZipPath(normalized)) {
             continue;
         }
@@ -247,12 +245,25 @@ app.post("/upload/project", projectUpload.single("project"), async (req, res) =>
                 error: "Flutter project upload must be a ZIP file.",
             });
         }
+        // ========================================================
+        // OPEN ZIP FROM DISK
+        // ========================================================
+        //
         // IMPORTANT:
-        // The ZIP is now read from disk instead of
-        // being stored in RAM by multer.
-        let zip;
+        //
+        // Do NOT use AdmZip here.
+        //
+        // AdmZip loads the entire archive into memory.
+        // That can exceed Render's 512 MB memory limit when
+        // processing large Flutter project ZIP files.
+        //
+        // unzipper.Open.file() reads the ZIP directory and lets
+        // us stream individual files directly to disk.
+        //
+        let directory;
         try {
-            zip = new AdmZip(uploadedZipPath);
+            directory =
+                await unzipper.Open.file(uploadedZipPath);
         }
         catch {
             return res.status(400).json({
@@ -260,19 +271,26 @@ app.post("/upload/project", projectUpload.single("project"), async (req, res) =>
                 error: "The uploaded file is not a valid ZIP archive.",
             });
         }
-        const entries = zip.getEntries();
+        const entries = directory.files;
         if (entries.length === 0) {
             return res.status(400).json({
                 success: false,
                 error: "The uploaded ZIP file is empty.",
             });
         }
+        // ========================================================
+        // FIND FLUTTER PROJECT ROOT
+        // ========================================================
         const projectRoot = findFlutterProjectRoot(entries);
-        const pubspecEntry = entries.find((entry) => {
-            if (entry.isDirectory) {
+        // ========================================================
+        // FIND PUBSPEC
+        // ========================================================
+        const pubspecEntry = directory.files.find((entry) => {
+            if (entry.type ===
+                "Directory") {
                 return false;
             }
-            const normalized = normalizeZipPath(entry.entryName);
+            const normalized = normalizeZipPath(entry.path);
             if (!isSafeZipPath(normalized)) {
                 return false;
             }
@@ -294,22 +312,38 @@ app.post("/upload/project", projectUpload.single("project"), async (req, res) =>
                 error: "No Flutter pubspec.yaml was found in the uploaded ZIP.",
             });
         }
+        // ========================================================
+        // CREATE PROJECT WORKSPACE
+        // ========================================================
         const { workspace, projectPath, } = await createProjectWorkspace();
         workspaceDirectory =
             workspace.directory;
         let extractedFiles = 0;
         let extractedBytes = 0;
-        for (const entry of entries) {
-            if (entry.isDirectory) {
+        // ========================================================
+        // STREAM ZIP FILES TO DISK
+        // ========================================================
+        for (const entry of directory.files) {
+            if (entry.type ===
+                "Directory") {
                 continue;
             }
-            let normalized = normalizeZipPath(entry.entryName);
+            let normalized = normalizeZipPath(entry.path);
+            // ------------------------------------------------------
+            // SECURITY
+            // ------------------------------------------------------
             if (!isSafeZipPath(normalized)) {
-                throw new Error(`Unsafe ZIP file path: ${entry.entryName}`);
+                throw new Error(`Unsafe ZIP file path: ${entry.path}`);
             }
+            // ------------------------------------------------------
+            // IGNORE GENERATED / TOOLING DIRECTORIES
+            // ------------------------------------------------------
             if (shouldIgnoreZipPath(normalized)) {
                 continue;
             }
+            // ------------------------------------------------------
+            // STRIP PROJECT ROOT
+            // ------------------------------------------------------
             if (projectRoot) {
                 const prefix = `${projectRoot}/`;
                 if (normalized ===
@@ -325,28 +359,54 @@ app.post("/upload/project", projectUpload.single("project"), async (req, res) =>
             if (!normalized) {
                 continue;
             }
+            // ------------------------------------------------------
+            // FILE COUNT LIMIT
+            // ------------------------------------------------------
             if (extractedFiles >=
                 MAX_PROJECT_FILES) {
                 throw new Error(`Flutter project contains more than ${MAX_PROJECT_FILES} files.`);
             }
-            const data = entry.getData();
-            if (data.length >
+            // ------------------------------------------------------
+            // INDIVIDUAL FILE SIZE LIMIT
+            // ------------------------------------------------------
+            const entrySize = Number(entry.uncompressedSize ?? 0);
+            if (entrySize >
                 MAX_PROJECT_FILE_SIZE) {
                 throw new Error(`Project file is too large: ${normalized}`);
             }
+            // ------------------------------------------------------
+            // TOTAL EXTRACTION SIZE LIMIT
+            // ------------------------------------------------------
             extractedBytes +=
-                data.length;
+                entrySize;
             if (extractedBytes >
                 MAX_PROJECT_TOTAL_SIZE) {
                 throw new Error("Extracted Flutter project exceeds the 1 GB limit.");
             }
+            // ------------------------------------------------------
+            // DESTINATION
+            // ------------------------------------------------------
             const destination = resolveProjectFilePath(projectPath, normalized);
             await fs.mkdir(path.dirname(destination), {
                 recursive: true,
             });
-            await fs.writeFile(destination, data);
+            // ------------------------------------------------------
+            // STREAM ENTRY DIRECTLY TO DISK
+            // ------------------------------------------------------
+            //
+            // This is the key memory optimization.
+            //
+            // The file is NOT converted into a Buffer.
+            //
+            // ZIP entry -> stream -> destination file
+            //
+            const readStream = await entry.stream();
+            await pipeline(readStream, (await import("fs")).createWriteStream(destination));
             extractedFiles++;
         }
+        // ========================================================
+        // VERIFY PUBSPEC AT PROJECT ROOT
+        // ========================================================
         const pubspecPath = resolveProjectFilePath(projectPath, "pubspec.yaml");
         try {
             await fs.access(pubspecPath);
@@ -354,6 +414,9 @@ app.post("/upload/project", projectUpload.single("project"), async (req, res) =>
         catch {
             throw new Error("Flutter project extraction failed because pubspec.yaml was not found at the project root.");
         }
+        // ========================================================
+        // SUCCESS
+        // ========================================================
         return res.json({
             success: true,
             type: "flutter-project",
@@ -447,6 +510,7 @@ app.all(MCP_PATH, async (req, res) => {
             },
         });
         // IMPORTANT:
+        //
         // Create a completely new MCP server instance
         // for every Streamable HTTP session.
         //

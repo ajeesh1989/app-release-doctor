@@ -28,6 +28,7 @@
     "adm-zip": "^0.6.1",
     "express": "^5.2.1",
     "multer": "^2.3.0",
+    "unzipper": "^0.12.5",
     "zod": "^4.5.4"
   },
   "devDependencies": {
@@ -35,6 +36,7 @@
     "@types/express": "^5.0.6",
     "@types/multer": "^2.2.0",
     "@types/node": "^26.5.0",
+    "@types/unzipper": "^0.10.11",
     "typescript": "^7.0.2"
   }
 }
