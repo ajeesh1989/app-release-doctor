@@ -6,15 +6,19 @@ import path from "path";
 import os from "os";
 import { pipeline } from "stream/promises";
 import unzipper from "unzipper";
+import { Readable } from "node:stream";
 
 import {
   StreamableHTTPServerTransport,
 } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 import { createServer } from "./index.js";
+import {
+  MAX_AAB_SIZE,
+  persistAabUpload,
+} from "./aab-upload.js";
 
 import {
-  createAabWorkspace,
   createProjectWorkspace,
   resolveProjectFilePath,
   cleanupExpiredRemoteWorkspaces,
@@ -34,9 +38,6 @@ const MCP_TOKEN =
 // ============================================================
 // LIMITS
 // ============================================================
-
-const MAX_AAB_SIZE =
-  1024 * 1024 * 1024;
 
 const MAX_PROJECT_ZIP_SIZE =
   500 * 1024 * 1024;
@@ -351,10 +352,6 @@ app.post(
   "/upload/aab",
   aabUpload.single("aab"),
   async (req, res) => {
-    let workspaceDirectory:
-      | string
-      | undefined;
-
     try {
       if (!req.file) {
         return res.status(400).json({
@@ -382,43 +379,20 @@ app.post(
       // IMPORTANT:
       // Preserve the original uploaded filename.
 
-      const {
-        workspace,
-        aabPath,
-      } =
-        await createAabWorkspace(
+      const uploaded =
+        await persistAabUpload(
           originalName,
+          Readable.from([
+            req.file.buffer,
+          ]),
         );
-
-      workspaceDirectory =
-        workspace.directory;
-
-      await fs.writeFile(
-        aabPath,
-        req.file.buffer,
-      );
 
       return res.json({
         success: true,
         type: "aab",
-        uploadId:
-          workspace.id,
-        fileName:
-          originalName,
-        size:
-          req.file.size,
-        expiresAt:
-          new Date(
-            workspace.expiresAt,
-          ).toISOString(),
+        ...uploaded,
       });
     } catch (error) {
-      if (workspaceDirectory) {
-        await removeRemoteWorkspace(
-          workspaceDirectory,
-        ).catch(() => {});
-      }
-
       console.error(
         "Remote AAB upload failed:",
         error,

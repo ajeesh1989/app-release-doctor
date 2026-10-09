@@ -19,6 +19,7 @@ import {
   resolveAabWorkspace,
   resolveProjectWorkspace,
 } from "./remote-workspace.js";
+import { uploadChatGPTAab } from "./aab-upload.js";
 
 const execAsync = promisify(exec);
 
@@ -1885,6 +1886,51 @@ NEXT STEP
 // ============================================================
 // TOOL 6 — SMART AAB DOCTOR
 // ============================================================
+
+server.registerTool(
+  "upload_aab",
+  {
+    title: "Upload Android App Bundle",
+    description:
+      "Upload a user-provided Android App Bundle before calling inspect_aab. ChatGPT supplies the attached file through its supported file input.",
+    inputSchema: {
+      file: z
+        .object({
+          download_url: z.string().url(),
+          file_id: z.string().min(1),
+          mime_type: z.string().optional(),
+          file_name: z.string().optional(),
+        }),
+    },
+    _meta: {
+      "openai/fileParams": ["file"],
+    },
+  },
+  async ({ file }) => {
+    if (!file) {
+      return textResult(
+        "AAB upload failed: No AAB file was attached. Attach a .aab file and try again.",
+      );
+    }
+
+    try {
+      const uploaded =
+        await uploadChatGPTAab(file);
+
+      return textResult(
+        `AAB upload complete.\n\nFile: ${uploaded.fileName}\nSize: ${uploaded.size} bytes\nUpload ID: ${uploaded.uploadId}\n\nCall inspect_aab with uploadId set to ${uploaded.uploadId}.`,
+      );
+    } catch (error) {
+      return textResult(
+        `AAB upload failed: ${
+          error instanceof Error
+            ? error.message
+            : String(error)
+        }\n\nReattach a valid .aab file and try again.`,
+      );
+    }
+  },
+);
 
 server.tool(
   "inspect_aab",

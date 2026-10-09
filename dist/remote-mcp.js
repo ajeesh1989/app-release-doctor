@@ -6,9 +6,11 @@ import path from "path";
 import os from "os";
 import { pipeline } from "stream/promises";
 import unzipper from "unzipper";
+import { Readable } from "node:stream";
 import { StreamableHTTPServerTransport, } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createServer } from "./index.js";
-import { createAabWorkspace, createProjectWorkspace, resolveProjectFilePath, cleanupExpiredRemoteWorkspaces, removeRemoteWorkspace, } from "./remote-workspace.js";
+import { MAX_AAB_SIZE, persistAabUpload, } from "./aab-upload.js";
+import { createProjectWorkspace, resolveProjectFilePath, cleanupExpiredRemoteWorkspaces, removeRemoteWorkspace, } from "./remote-workspace.js";
 const app = express();
 const PORT = Number(process.env.PORT) || 8787;
 const MCP_PATH = "/mcp";
@@ -16,7 +18,6 @@ const MCP_TOKEN = process.env.APP_RELEASE_DOCTOR_TOKEN || "";
 // ============================================================
 // LIMITS
 // ============================================================
-const MAX_AAB_SIZE = 1024 * 1024 * 1024;
 const MAX_PROJECT_ZIP_SIZE = 500 * 1024 * 1024;
 const MAX_PROJECT_FILE_SIZE = 20 * 1024 * 1024;
 const MAX_PROJECT_FILES = 5000;
@@ -176,7 +177,6 @@ function findFlutterProjectRoot(entries) {
 // REMOTE AAB UPLOAD
 // ============================================================
 app.post("/upload/aab", aabUpload.single("aab"), async (req, res) => {
-    let workspaceDirectory;
     try {
         if (!req.file) {
             return res.status(400).json({
@@ -195,23 +195,16 @@ app.post("/upload/aab", aabUpload.single("aab"), async (req, res) => {
         }
         // IMPORTANT:
         // Preserve the original uploaded filename.
-        const { workspace, aabPath, } = await createAabWorkspace(originalName);
-        workspaceDirectory =
-            workspace.directory;
-        await fs.writeFile(aabPath, req.file.buffer);
+        const uploaded = await persistAabUpload(originalName, Readable.from([
+            req.file.buffer,
+        ]));
         return res.json({
             success: true,
             type: "aab",
-            uploadId: workspace.id,
-            fileName: originalName,
-            size: req.file.size,
-            expiresAt: new Date(workspace.expiresAt).toISOString(),
+            ...uploaded,
         });
     }
     catch (error) {
-        if (workspaceDirectory) {
-            await removeRemoteWorkspace(workspaceDirectory).catch(() => { });
-        }
         console.error("Remote AAB upload failed:", error);
         return res.status(500).json({
             success: false,

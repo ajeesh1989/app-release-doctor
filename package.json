@@ -10,7 +10,8 @@
     "remote-mcp": "node dist/remote-mcp.js",
     "web": "node dist/web.js",
     "start": "node dist/web.js",
-    "inspect": "npx @modelcontextprotocol/inspector node dist/index.js"
+    "inspect": "npx @modelcontextprotocol/inspector node dist/index.js",
+    "test": "npm run build && node --test test/*.test.mjs"
   },
   "keywords": [
     "flutter",
